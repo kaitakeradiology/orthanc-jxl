@@ -1,0 +1,98 @@
+diff -r 8dd00670b904 OrthancFramework/Sources/Enumerations.h
+--- a/OrthancFramework/Sources/Enumerations.h	Tue Dec 02 19:15:43 2025 +0100
++++ b/OrthancFramework/Sources/Enumerations.h	Sun Dec 07 10:54:39 2025 +0000
+@@ -282,6 +282,9 @@
+     DicomTransferSyntax_MPEG4StereoHighProfileLevel4_2    /*!< MPEG4 AVC/H.264 Stereo High Profile / Level 4.2 */,
+     DicomTransferSyntax_HEVCMainProfileLevel5_1    /*!< HEVC/H.265 Main Profile / Level 5.1 */,
+     DicomTransferSyntax_HEVCMain10ProfileLevel5_1    /*!< HEVC/H.265 Main 10 Profile / Level 5.1 */,
++    DicomTransferSyntax_JPEGXLLossless    /*!< JPEG XL Lossless */,
++    DicomTransferSyntax_JPEGXLJPEGRecompression    /*!< JPEG XL JPEG Recompression */,
++    DicomTransferSyntax_JPEGXL    /*!< JPEG XL */,
+     DicomTransferSyntax_RLELossless    /*!< RLE - Run Length Encoding (lossless) */,
+     DicomTransferSyntax_RFC2557MimeEncapsulation    /*!< RFC 2557 MIME Encapsulation */,
+     DicomTransferSyntax_XML    /*!< XML Encoding */
+diff -r 8dd00670b904 OrthancFramework/Sources/Enumerations_TransferSyntaxes.impl.h
+--- a/OrthancFramework/Sources/Enumerations_TransferSyntaxes.impl.h	Tue Dec 02 19:15:43 2025 +0100
++++ b/OrthancFramework/Sources/Enumerations_TransferSyntaxes.impl.h	Sun Dec 07 10:54:39 2025 +0000
+@@ -146,6 +146,15 @@
+       case DicomTransferSyntax_HEVCMain10ProfileLevel5_1:
+         return "1.2.840.10008.1.2.4.108";
+ 
++      case DicomTransferSyntax_JPEGXLLossless:
++        return "1.2.840.10008.1.2.4.110";
++
++      case DicomTransferSyntax_JPEGXLJPEGRecompression:
++        return "1.2.840.10008.1.2.4.111";
++
++      case DicomTransferSyntax_JPEGXL:
++        return "1.2.840.10008.1.2.4.112";
++
+       case DicomTransferSyntax_RLELossless:
+         return "1.2.840.10008.1.2.5";
+ 
+@@ -282,6 +291,15 @@
+       case DicomTransferSyntax_HEVCMain10ProfileLevel5_1:
+         return false;
+ 
++      case DicomTransferSyntax_JPEGXLLossless:
++        return false;
++
++      case DicomTransferSyntax_JPEGXLJPEGRecompression:
++        return false;
++
++      case DicomTransferSyntax_JPEGXL:
++        return false;
++
+       case DicomTransferSyntax_RLELossless:
+         return false;
+ 
+@@ -533,7 +551,25 @@
+       target = DicomTransferSyntax_HEVCMain10ProfileLevel5_1;
+       return true;
+     }
+-    
++
++    if (uid == "1.2.840.10008.1.2.4.110")
++    {
++      target = DicomTransferSyntax_JPEGXLLossless;
++      return true;
++    }
++
++    if (uid == "1.2.840.10008.1.2.4.111")
++    {
++      target = DicomTransferSyntax_JPEGXLJPEGRecompression;
++      return true;
++    }
++
++    if (uid == "1.2.840.10008.1.2.4.112")
++    {
++      target = DicomTransferSyntax_JPEGXL;
++      return true;
++    }
++
+     if (uid == "1.2.840.10008.1.2.5")
+     {
+       target = DicomTransferSyntax_RLELossless;
+@@ -598,6 +634,9 @@
+     target.insert(DicomTransferSyntax_MPEG4StereoHighProfileLevel4_2);
+     target.insert(DicomTransferSyntax_HEVCMainProfileLevel5_1);
+     target.insert(DicomTransferSyntax_HEVCMain10ProfileLevel5_1);
++    target.insert(DicomTransferSyntax_JPEGXLLossless);
++    target.insert(DicomTransferSyntax_JPEGXLJPEGRecompression);
++    target.insert(DicomTransferSyntax_JPEGXL);
+     target.insert(DicomTransferSyntax_RLELossless);
+     target.insert(DicomTransferSyntax_RFC2557MimeEncapsulation);
+     target.insert(DicomTransferSyntax_XML);
+diff -r 8dd00670b904 OrthancServer/Resources/DicomConformanceStatement.txt
+--- a/OrthancServer/Resources/DicomConformanceStatement.txt	Tue Dec 02 19:15:43 2025 +0100
++++ b/OrthancServer/Resources/DicomConformanceStatement.txt	Sun Dec 07 10:54:39 2025 +0000
+@@ -259,6 +259,9 @@
+   JPIPReferencedDeflateTransferSyntax                                   | 1.2.840.10008.1.2.4.95
+   MPEG2MainProfileAtMainLevelTransferSyntax                             | 1.2.840.10008.1.2.4.100
+   MPEG2MainProfileAtHighLevelTransferSyntax                             | 1.2.840.10008.1.2.4.101
++  JPEGXLLosslessTransferSyntax                                          | 1.2.840.10008.1.2.4.110
++  JPEGXLJPEGRecompressionTransferSyntax                                 | 1.2.840.10008.1.2.4.111
++  JPEGXLTransferSyntax                                                  | 1.2.840.10008.1.2.4.112
+   RLELosslessTransferSyntax                                             | 1.2.840.10008.1.2.5
+ 
+ It is possible to disable a subset of these transfer syntaxes thanks
