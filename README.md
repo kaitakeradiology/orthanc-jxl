@@ -22,23 +22,9 @@ The plugin implements the official DICOM Transfer Syntax UIDs defined in PS3.5 2
 - 8-bit and 16-bit grayscale/RGB pixel formats
 - Parallel encoding via libjxl thread runner
 
-## Orthanc Patch Required
+## Requirements
 
-**Important:** JPEG-XL transfer syntaxes are new to DICOM (PS3.5 2025e) and are not yet included in upstream Orthanc. You must apply a patch to Orthanc to add the transfer syntax definitions before using this plugin.
-
-The patch adds the following transfer syntaxes to Orthanc's framework:
-- `DicomTransferSyntax_JPEGXLLossless` (1.2.840.10008.1.2.4.110)
-- `DicomTransferSyntax_JPEGXLJPEGRecompression` (1.2.840.10008.1.2.4.111)
-- `DicomTransferSyntax_JPEGXL` (1.2.840.10008.1.2.4.112)
-
-### Applying the Patch
-
-```bash
-cd /path/to/orthanc
-patch -p1 < /path/to/orthanc-jxl/patches/orthanc-jpegxl-transfer-syntaxes.patch
-```
-
-Then rebuild Orthanc. The JPEG-XL transfer syntaxes will appear in the DICOM conformance statement at `/tools/dicom-conformance`.
+**Orthanc with JPEG-XL transfer syntax support** - requires Orthanc revision [e94178d6b6a2](https://orthanc.uclouvain.be/hg/orthanc/rev/e94178d6b6a2) (2025-12-09) or later.
 
 ## Building
 
@@ -48,7 +34,7 @@ Then rebuild Orthanc. The JPEG-XL transfer syntaxes will appear in the DICOM con
 - [Meson](https://mesonbuild.com/) build system (>= 0.50)
 - [libjxl](https://github.com/libjxl/libjxl) (>= 0.8)
 - [DCMTK](https://dicom.offis.de/dcmtk) (>= 3.6.7)
-- [Orthanc](https://www.orthanc-server.com/) with JPEG-XL transfer syntax patch (see above)
+- [Orthanc](https://www.orthanc-server.com/) (>= e94178d6b6a2, see Requirements)
 
 #### Debian/Ubuntu
 
