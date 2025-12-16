@@ -116,6 +116,21 @@ The plugin defaults to **ProgressiveLossless** mode, matching `cjxl -d 0 -p -e 7
 - Responsive mode with squeeze transform
 - Center-first group ordering for streaming decode
 
+### Benchmark (512x512 16-bit CT, libjxl 0.12)
+
+```
+Mode                     Effort   Enc (ms)   Dec (ms)  Size (KB)    Ratio  Roundtrip
+------------------------ ------ ---------- ---------- ---------- -------- ----------
+ProgressiveLossless           7       62.8        5.9      113.8    4.50x        yes
+ProgressiveLossless           9      183.0       10.7      113.1    4.53x        yes
+Lossless                      7       24.6        6.4       92.4    5.54x        yes
+Lossless                      9       92.0        6.2       90.2    5.68x        yes
+Lossy (d=1.0)                 7       31.1        1.7       20.0   25.65x        N/A
+Lossy (d=1.0)                 9       41.7        1.8       20.0   25.63x        N/A
+```
+
+Build with `-Dtests=true` and run `build/tests/jxl-benchmark <dicom_file>`.
+
 ## Limitations
 
 - Single-frame images only (multi-frame support planned)
