@@ -125,7 +125,10 @@ curl -X POST http://localhost:8042/studies/{id}/modify \
 | Lossless | No | Yes | Archival storage |
 | ProgressiveLossless | Yes | Yes | Streaming + archival |
 
-The plugin currently defaults to **ProgressiveLossless** mode with center-first group ordering.
+The plugin defaults to **ProgressiveLossless** mode, matching `cjxl -d 0 -p -e 7 --group_order 1`:
+- Effort 7 (balances encode speed and compression)
+- Responsive mode with squeeze transform
+- Center-first group ordering for streaming decode
 
 ## Limitations
 

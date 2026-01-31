@@ -46,7 +46,7 @@ enum class EncodeMode {
 
 struct EncodeOptions {
     EncodeMode mode = EncodeMode::ProgressiveLossless;
-    int effort = 7;          // 1-9
+    int effort = 7;          // 1-10, default 7 balances speed and compression
     int centerX = -1;        // Center for group ordering (-1 = auto)
     int centerY = -1;
     int progressiveDC = 0;   // VarDCT only (0-2)
