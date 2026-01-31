@@ -68,6 +68,8 @@ public:
     // Modification
     void SetJxlPixelData(const std::vector<uint8_t>& jxlData);
     void SetJxlPixelData(const uint8_t* data, size_t size);
+    void SetNativePixelData(const std::vector<uint8_t>& pixelData);
+    void SetNativePixelData(const uint8_t* data, size_t size);
     void SetTransferSyntax(const std::string& transferSyntaxUid);
 
     // Serialization

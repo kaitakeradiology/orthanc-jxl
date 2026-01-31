@@ -1,0 +1,75 @@
+diff -r f91a925218f2 Plugin/WadoRsRetrieveFrames.cpp
+--- a/Plugin/WadoRsRetrieveFrames.cpp	Tue Dec 09 07:57:08 2025 +0100
++++ b/Plugin/WadoRsRetrieveFrames.cpp	Wed Dec 17 06:31:37 2025 +0000
+@@ -207,6 +207,22 @@
+           syntax = Orthanc::DicomTransferSyntax_JPEG2000Multicomponent;
+           return true;
+         }
++        else if (type == "image/jxl" && (transferSyntax.empty() ||
++                                         transferSyntax == "1.2.840.10008.1.2.4.110"))
++        {
++          syntax = Orthanc::DicomTransferSyntax_JPEGXLLossless;
++          return true;
++        }
++        else if (type == "image/jxl" && transferSyntax == "1.2.840.10008.1.2.4.111")
++        {
++          syntax = Orthanc::DicomTransferSyntax_JPEGXLJPEGRecompression;
++          return true;
++        }
++        else if (type == "image/jxl" && transferSyntax == "1.2.840.10008.1.2.4.112")
++        {
++          syntax = Orthanc::DicomTransferSyntax_JPEGXL;
++          return true;
++        }
+ 
+ 
+         /**
+@@ -379,6 +395,15 @@
+     case Orthanc::DicomTransferSyntax_JPEG2000Multicomponent:
+       return "image/jpx; transfer-syntax=1.2.840.10008.1.2.4.93";
+ 
++    case Orthanc::DicomTransferSyntax_JPEGXLLossless:
++      return "image/jxl; transfer-syntax=1.2.840.10008.1.2.4.110";
++
++    case Orthanc::DicomTransferSyntax_JPEGXLJPEGRecompression:
++      return "image/jxl; transfer-syntax=1.2.840.10008.1.2.4.111";
++
++    case Orthanc::DicomTransferSyntax_JPEGXL:
++      return "image/jxl; transfer-syntax=1.2.840.10008.1.2.4.112";
++
+     default:
+       throw Orthanc::OrthancException(Orthanc::ErrorCode_InternalError, std::string("WADO RS Retrieve frame: unhandled Transfer syntax ") + Orthanc::GetTransferSyntaxUid(syntax));
+   }
+@@ -516,15 +541,30 @@
+       // "The Implicit VR Little Endian (1.2.840.10008.1.2), and Explicit VR Big Endian (1.2.840.10008.1.2.2) transfer syntaxes shall not be used with Web Services."
+       LOG(INFO) << "The file is in a transfer syntax " << transferSyntax << " that is not allowed by the DICOMweb standard -> it will be transcoded to Little Endian Explicit";
+       targetSyntax = Orthanc::DicomTransferSyntax_LittleEndianExplicit;
+-    }    
++    }
++
++    // Check if JPEG-XL should be transcoded (most clients don't support it yet)
++    bool isJpegXl = (currentSyntax == Orthanc::DicomTransferSyntax_JPEGXLLossless ||
++                     currentSyntax == Orthanc::DicomTransferSyntax_JPEGXLJPEGRecompression ||
++                     currentSyntax == Orthanc::DicomTransferSyntax_JPEGXL);    
+ 
+     bool transcodeThisInstance = false;
+-    
++
+     if (ParseTransferSyntax(targetSyntax, request))
+     {
+       transcodeThisInstance = targetSyntax != currentSyntax;
+     }
+ 
++    // If client requested transfer-syntax=* (targetSyntax unchanged) and source is JPEG-XL,
++    // transcode to uncompressed since most clients don't support JPEG-XL yet
++    if (isJpegXl && targetSyntax == currentSyntax)
++    {
++      LOG(INFO) << "DICOMweb RetrieveFrames: JPEG-XL source with transfer-syntax=* requested, "
++                << "transcoding to Little Endian Explicit for client compatibility";
++      targetSyntax = Orthanc::DicomTransferSyntax_LittleEndianExplicit;
++      transcodeThisInstance = true;
++    }
++
+     // maximize the use the Orthanc storage cache.  Since 1.12.2, transcoded file may be stored in the storage cache
+     if (pluginCanDownloadTranscodedFile && transcodeThisInstance)
+     {

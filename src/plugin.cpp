@@ -23,6 +23,7 @@
 #include "transfer_syntax.h"
 #include "version.h"
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -48,8 +49,6 @@ static OrthancPluginErrorCode DecodeImageCallback(
             // Not our transfer syntax, let another decoder handle it
             return OrthancPluginErrorCode_NotImplemented;
         }
-
-        OrthancPluginLogInfo(context_, "orthanc-jxl: Decoding JPEG-XL image");
 
         // Get image info
         DicomImageInfo dicomInfo = handler.GetImageInfo();
@@ -111,7 +110,6 @@ static OrthancPluginErrorCode DecodeImageCallback(
         }
 
         *target = image;
-        OrthancPluginLogInfo(context_, "orthanc-jxl: Successfully decoded JPEG-XL image");
         return OrthancPluginErrorCode_Success;
 
     } catch (const std::exception& e) {
@@ -134,78 +132,112 @@ static OrthancPluginErrorCode TranscoderCallback(
 {
     (void)allowNewSopInstanceUid;  // Not used for JXL transcoding
 
-    // Check if JXL lossless is in the allowed list
+    // Check what transfer syntaxes are requested
     bool jxlRequested = false;
+    const char* uncompressedSyntax = nullptr;
+
     for (uint32_t i = 0; i < countSyntaxes; ++i) {
         if (strcmp(allowedSyntaxes[i], TS_JPEG_XL_LOSSLESS) == 0) {
             jxlRequested = true;
-            break;
         }
-    }
-
-    if (!jxlRequested) {
-        return OrthancPluginErrorCode_NotImplemented;
+        // Track first uncompressed syntax for FROM-JXL transcoding
+        if (!uncompressedSyntax && IsUncompressedTransferSyntax(allowedSyntaxes[i])) {
+            uncompressedSyntax = allowedSyntaxes[i];
+        }
     }
 
     try {
-        OrthancPluginLogInfo(context_, "orthanc-jxl: Transcoding to JPEG-XL lossless");
-
         DicomHandler handler(buffer, static_cast<size_t>(size));
-
-        // Check if already JXL encoded
         std::string currentTs = handler.GetTransferSyntax();
-        if (IsJxlTransferSyntax(currentTs)) {
-            OrthancPluginLogInfo(context_, "orthanc-jxl: Already JPEG-XL encoded, skipping");
-            return OrthancPluginErrorCode_NotImplemented;
+
+        // Case 1: Source is JXL and uncompressed output is requested (FROM-JXL)
+        if (IsJxlTransferSyntax(currentTs) && uncompressedSyntax) {
+            // Extract encapsulated JXL data
+            std::vector<uint8_t> jxlData = handler.GetEncapsulatedData(0);
+
+            // Decode JXL
+            auto [pixels, jxlInfo] = JxlCodec::Decode(jxlData);
+
+            // Set native pixel data
+            handler.SetNativePixelData(pixels);
+            handler.SetTransferSyntax(uncompressedSyntax);
+
+            // Write to buffer
+            std::vector<uint8_t> output = handler.WriteToBuffer(uncompressedSyntax);
+
+            // Allocate Orthanc buffer
+            if (OrthancPluginCreateMemoryBuffer(context_, transcoded, output.size())
+                != OrthancPluginErrorCode_Success) {
+                OrthancPluginLogError(context_, "orthanc-jxl: Failed to allocate output buffer");
+                return OrthancPluginErrorCode_Plugin;
+            }
+
+            memcpy(transcoded->data, output.data(), output.size());
+
+            char logMsg[256];
+            snprintf(logMsg, sizeof(logMsg),
+                "orthanc-jxl: Transcoded FROM JXL %zu KB -> %zu KB",
+                jxlData.size() / 1024, pixels.size() / 1024);
+            OrthancPluginLogInfo(context_, logMsg);
+
+            return OrthancPluginErrorCode_Success;
         }
 
-        // Get image info
-        DicomImageInfo info = handler.GetImageInfo();
+        // Case 2: JXL is requested and source is not JXL (TO-JXL)
+        if (jxlRequested && !IsJxlTransferSyntax(currentTs)) {
+            DicomImageInfo info = handler.GetImageInfo();
 
-        // Get raw pixels
-        std::vector<uint8_t> pixels = handler.GetPixelData();
+            // Get raw pixels
+            std::vector<uint8_t> pixels = handler.GetPixelData();
 
-        // Determine pixel format
-        PixelFormat format;
-        if (info.samplesPerPixel == 1) {
-            format = (info.bitsAllocated <= 8) ? PixelFormat::Gray8 : PixelFormat::Gray16;
-        } else {
-            format = (info.bitsAllocated <= 8) ? PixelFormat::RGB24 : PixelFormat::RGB48;
+            // Determine pixel format
+            PixelFormat format;
+            if (info.samplesPerPixel == 1) {
+                format = (info.bitsAllocated <= 8) ? PixelFormat::Gray8 : PixelFormat::Gray16;
+            } else {
+                format = (info.bitsAllocated <= 8) ? PixelFormat::RGB24 : PixelFormat::RGB48;
+            }
+
+            // Encode to JXL (progressive lossless with center-first ordering)
+            std::vector<uint8_t> jxlData = JxlCodec::EncodeProgressiveLossless(
+                pixels.data(),
+                info.width,
+                info.height,
+                format,
+                7,  // effort
+                static_cast<int>(info.width / 2),   // centerX
+                static_cast<int>(info.height / 2)   // centerY
+            );
+
+            // Set JXL pixel data in DICOM
+            handler.SetJxlPixelData(jxlData);
+            handler.SetTransferSyntax(TS_JPEG_XL_LOSSLESS);
+
+            // Write to buffer
+            std::vector<uint8_t> output = handler.WriteToBuffer(TS_JPEG_XL_LOSSLESS);
+
+            // Allocate Orthanc buffer
+            if (OrthancPluginCreateMemoryBuffer(context_, transcoded, output.size())
+                != OrthancPluginErrorCode_Success) {
+                OrthancPluginLogError(context_, "orthanc-jxl: Failed to allocate output buffer");
+                return OrthancPluginErrorCode_Plugin;
+            }
+
+            memcpy(transcoded->data, output.data(), output.size());
+
+            // Log compression stats
+            double ratio = static_cast<double>(pixels.size()) / jxlData.size();
+            char logMsg[256];
+            snprintf(logMsg, sizeof(logMsg),
+                "orthanc-jxl: Transcoded TO JXL %zu KB -> %zu KB (%.2fx)",
+                pixels.size() / 1024, jxlData.size() / 1024, ratio);
+            OrthancPluginLogInfo(context_, logMsg);
+
+            return OrthancPluginErrorCode_Success;
         }
 
-        // Encode to JXL (progressive lossless with center-first ordering)
-        std::vector<uint8_t> jxlData = JxlCodec::EncodeProgressiveLossless(
-            pixels.data(),
-            info.width,
-            info.height,
-            format,
-            7,  // effort
-            static_cast<int>(info.width / 2),   // centerX
-            static_cast<int>(info.height / 2)   // centerY
-        );
-
-        OrthancPluginLogInfo(context_,
-            (std::string("orthanc-jxl: Encoded ") + std::to_string(pixels.size()) +
-             " bytes to " + std::to_string(jxlData.size()) + " bytes JXL").c_str());
-
-        // Set JXL pixel data in DICOM
-        handler.SetJxlPixelData(jxlData);
-        handler.SetTransferSyntax(TS_JPEG_XL_LOSSLESS);
-
-        // Write to buffer
-        std::vector<uint8_t> output = handler.WriteToBuffer(TS_JPEG_XL_LOSSLESS);
-
-        // Allocate Orthanc buffer
-        if (OrthancPluginCreateMemoryBuffer(context_, transcoded, output.size())
-            != OrthancPluginErrorCode_Success) {
-            OrthancPluginLogError(context_, "orthanc-jxl: Failed to allocate output buffer");
-            return OrthancPluginErrorCode_Plugin;
-        }
-
-        memcpy(transcoded->data, output.data(), output.size());
-
-        OrthancPluginLogInfo(context_, "orthanc-jxl: Transcoding complete");
-        return OrthancPluginErrorCode_Success;
+        // Not our job
+        return OrthancPluginErrorCode_NotImplemented;
 
     } catch (const std::exception& e) {
         OrthancPluginLogError(context_,
@@ -242,9 +274,9 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
     // Register transcoder callback for encoding to JXL
     OrthancPluginRegisterTranscoderCallback(context, TranscoderCallback);
 
-    OrthancPluginLogWarning(context,
+    OrthancPluginLogInfo(context,
         "orthanc-jxl: Plugin initialized - JPEG-XL transfer syntaxes enabled");
-    OrthancPluginLogWarning(context,
+    OrthancPluginLogInfo(context,
         "orthanc-jxl: Supported: 1.2.840.10008.1.2.4.110 (Lossless), "
         "1.2.840.10008.1.2.4.111 (JPEG Recompression), "
         "1.2.840.10008.1.2.4.112 (Lossy)");
@@ -254,7 +286,7 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
 
 ORTHANC_PLUGINS_API void OrthancPluginFinalize()
 {
-    OrthancPluginLogWarning(context_, "orthanc-jxl: Plugin finalized");
+    OrthancPluginLogInfo(context_, "orthanc-jxl: Plugin finalized");
     context_ = nullptr;
 }
 

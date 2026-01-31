@@ -27,10 +27,21 @@ constexpr const char* TS_JPEG_XL_LOSSLESS = "1.2.840.10008.1.2.4.110";
 constexpr const char* TS_JPEG_XL_JPEG_RECOMPRESSION = "1.2.840.10008.1.2.4.111";
 constexpr const char* TS_JPEG_XL = "1.2.840.10008.1.2.4.112";
 
+// Uncompressed transfer syntaxes for transcoding FROM JXL
+constexpr const char* TS_LITTLE_ENDIAN_EXPLICIT = "1.2.840.10008.1.2.1";
+constexpr const char* TS_BIG_ENDIAN_EXPLICIT = "1.2.840.10008.1.2.2";
+constexpr const char* TS_LITTLE_ENDIAN_IMPLICIT = "1.2.840.10008.1.2";
+
 inline bool IsJxlTransferSyntax(std::string_view ts) {
     return ts == TS_JPEG_XL_LOSSLESS ||
            ts == TS_JPEG_XL_JPEG_RECOMPRESSION ||
            ts == TS_JPEG_XL;
+}
+
+inline bool IsUncompressedTransferSyntax(std::string_view ts) {
+    return ts == TS_LITTLE_ENDIAN_EXPLICIT ||
+           ts == TS_BIG_ENDIAN_EXPLICIT ||
+           ts == TS_LITTLE_ENDIAN_IMPLICIT;
 }
 
 } // namespace orthanc_jxl
