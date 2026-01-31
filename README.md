@@ -89,6 +89,34 @@ Restart Orthanc and check the logs for:
 orthanc-jxl: Plugin initialized - JPEG-XL transfer syntaxes enabled
 ```
 
+## Configuration
+
+Add an `OrthancJxl` section to your Orthanc configuration file:
+
+```json
+{
+  "OrthancJxl": {
+    "Mode": "ProgressiveLossless",
+    "Effort": 7,
+    "Distance": 0.0,
+    "CenterFirstOrdering": true,
+    "ProgressiveDC": 0,
+    "ProgressiveAC": false
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `Mode` | string | `"ProgressiveLossless"` | Encoding mode: `"Lossless"`, `"ProgressiveLossless"`, or `"ProgressiveVarDCT"` |
+| `Effort` | int | `7` | Encoder effort level (1-10). Higher = slower but better compression |
+| `Distance` | float | `0.0` | Quality distance. 0.0 = mathematically lossless |
+| `CenterFirstOrdering` | bool | `true` | Enable center-first group ordering for streaming |
+| `ProgressiveDC` | int | `0` | VarDCT progressive DC level (0-2) |
+| `ProgressiveAC` | bool | `false` | VarDCT progressive AC encoding |
+
+All options are optional. The plugin uses sensible defaults if no configuration is provided.
+
 ## Usage
 
 Once installed, the plugin automatically:
@@ -135,7 +163,6 @@ Build with `-Dtests=true` and run `build/tests/jxl-benchmark <dicom_file>`.
 
 - Single-frame images only (multi-frame support planned)
 - Lossless encoding only (lossy VarDCT mode planned)
-- No configuration options yet (effort level, etc.)
 
 ## Contributing
 
@@ -153,6 +180,7 @@ This plugin is licensed under GPL-3.0 to comply with the Orthanc Plugin SDK lice
 |---------|---------|---------|
 | [libjxl](https://github.com/libjxl/libjxl) | BSD-3-Clause | JPEG-XL codec |
 | [DCMTK](https://dicom.offis.de/dcmtk) | BSD-3-Clause | DICOM parsing |
+| [nlohmann/json](https://github.com/nlohmann/json) | MIT | Configuration parsing |
 | [Orthanc SDK](https://www.orthanc-server.com/) | GPL-3.0 | Plugin API |
 
 ## References
