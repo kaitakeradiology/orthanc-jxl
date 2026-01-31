@@ -1,5 +1,5 @@
 project('orthanc-jxl', 'cpp',
-  version : '0.2.0',
+  version : '0.2.1',
   license : 'GPL-3.0-or-later',
   default_options : [
     'cpp_std=c++17',
