@@ -1,0 +1,17 @@
+# Build output
+builddir/
+build/
+
+# Meson subprojects (downloaded dependencies)
+subprojects/*
+!subprojects/*.wrap
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Compiled objects
+*.o
+*.so

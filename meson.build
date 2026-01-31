@@ -19,6 +19,9 @@ add_project_arguments('-DHAS_ORTHANC_EXCEPTION=0', language: 'cpp')
 jxl_dep = dependency('libjxl', method: 'pkg-config')
 jxl_threads_dep = dependency('libjxl_threads', method: 'pkg-config')
 
+# nlohmann/json for config parsing
+json_dep = dependency('nlohmann_json', fallback: ['nlohmann_json', 'nlohmann_json_dep'])
+
 # DCMTK - try pkg-config first, fallback to manual
 dcmtk_dep = dependency('dcmtk', method: 'pkg-config', required: false)
 dcmtk_found_via_pkg = dcmtk_dep.found()

@@ -21,6 +21,7 @@
 #include "jxl_codec.h"
 #include "dicom_handler.h"
 #include "transfer_syntax.h"
+#include "config.h"
 #include "version.h"
 
 #include <cstdio>
@@ -30,6 +31,7 @@
 using namespace orthanc_jxl;
 
 static OrthancPluginContext* context_ = nullptr;
+static PluginConfig pluginConfig_;
 
 // ============================================================================
 // Decode Image Callback
@@ -198,15 +200,14 @@ static OrthancPluginErrorCode TranscoderCallback(
                 format = (info.bitsAllocated <= 8) ? PixelFormat::RGB24 : PixelFormat::RGB48;
             }
 
-            // Encode to JXL (progressive lossless with center-first ordering)
-            std::vector<uint8_t> jxlData = JxlCodec::EncodeProgressiveLossless(
+            // Encode to JXL using configured options
+            EncodeOptions opts = pluginConfig_.GetEncodeOptions(info.width, info.height);
+            std::vector<uint8_t> jxlData = JxlCodec::Encode(
                 pixels.data(),
                 info.width,
                 info.height,
                 format,
-                7,  // effort
-                static_cast<int>(info.width / 2),   // centerX
-                static_cast<int>(info.height / 2)   // centerY
+                opts
             );
 
             // Set JXL pixel data in DICOM
@@ -267,6 +268,28 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
     }
 
     OrthancPluginSetDescription2(context, PLUGIN_NAME, PLUGIN_DESCRIPTION);
+
+    // Parse plugin configuration
+    char* configJson = OrthancPluginGetConfiguration(context);
+    if (configJson) {
+        pluginConfig_ = PluginConfig::Parse(configJson);
+        OrthancPluginFreeString(context, configJson);
+    } else {
+        pluginConfig_ = PluginConfig::Default();
+    }
+
+    // Log configuration
+    const char* modeName = "Unknown";
+    switch (pluginConfig_.encodeOptions.mode) {
+        case EncodeMode::Lossless: modeName = "Lossless"; break;
+        case EncodeMode::ProgressiveLossless: modeName = "ProgressiveLossless"; break;
+        case EncodeMode::ProgressiveVarDCT: modeName = "ProgressiveVarDCT"; break;
+    }
+    char configMsg[256];
+    snprintf(configMsg, sizeof(configMsg),
+        "orthanc-jxl: Config - Mode=%s, Effort=%d, Distance=%.2f",
+        modeName, pluginConfig_.encodeOptions.effort, pluginConfig_.encodeOptions.distance);
+    OrthancPluginLogInfo(context, configMsg);
 
     // Register decode callback for viewing JXL images
     OrthancPluginRegisterDecodeImageCallback(context, DecodeImageCallback);
