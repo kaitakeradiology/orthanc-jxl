@@ -92,6 +92,14 @@ PluginConfig PluginConfig::Parse(const char* jsonConfig) {
             config.centerFirstOrdering = section["CenterFirstOrdering"].get<bool>();
         }
 
+        // Parse single-frame encode thread count (0 = auto, >=1 = fixed)
+        if (section.contains("EncodeThreads")) {
+            int threads = section["EncodeThreads"].get<int>();
+            if (threads >= 0) {
+                config.encodeThreads = threads;
+            }
+        }
+
         // Parse VarDCT progressive options
         if (section.contains("ProgressiveDC")) {
             int dc = section["ProgressiveDC"].get<int>();

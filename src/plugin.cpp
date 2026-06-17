@@ -186,7 +186,8 @@ static OrthancPluginErrorCode TranscoderCallback(
         // Case 2: JXL is requested and source is not JXL (TO-JXL)
         if (jxlRequested && !IsJxlTransferSyntax(currentTs)) {
             TranscodeResult result = TranscodeToJxl(
-                buffer, static_cast<size_t>(size), pluginConfig_, *threadPool_);
+                buffer, static_cast<size_t>(size), pluginConfig_, *threadPool_,
+                pluginConfig_.SingleFrameThreads());
 
             if (OrthancPluginCreateMemoryBuffer(context_, transcoded, result.dicom.size())
                 != OrthancPluginErrorCode_Success) {
@@ -261,8 +262,9 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
     }
     char configMsg[256];
     snprintf(configMsg, sizeof(configMsg),
-        "orthanc-jxl: Config - Mode=%s, Effort=%d, Distance=%.2f",
-        modeName, pluginConfig_.encodeOptions.effort, pluginConfig_.encodeOptions.distance);
+        "orthanc-jxl: Config - Mode=%s, Effort=%d, Distance=%.2f, EncodeThreads=%d, Pool=%u",
+        modeName, pluginConfig_.encodeOptions.effort, pluginConfig_.encodeOptions.distance,
+        pluginConfig_.encodeThreads, threadPool_ ? (unsigned)threadPool_->Size() : 0u);
     OrthancPluginLogInfo(context, configMsg);
 
     // Register decode callback for viewing JXL images
