@@ -34,13 +34,28 @@ namespace orthanc_jxl {
  *     "Distance": 0.0,                 // 0.0 = lossless, >0 for lossy
  *     "CenterFirstOrdering": true,     // Enable center-first group ordering
  *     "ProgressiveDC": 0,              // VarDCT only: 0-2
- *     "ProgressiveAC": false           // VarDCT only
+ *     "ProgressiveAC": false,          // VarDCT only
+ *     "EncodeThreads": 0               // Single-frame encode threads: 0=auto, 1=single
  *   }
  * }
  */
 struct PluginConfig {
     EncodeOptions encodeOptions;
     bool centerFirstOrdering = true;  // Use image center for group ordering
+
+    // libjxl worker threads per single-frame encode:
+    //   0 = auto (one per core) - best when instances are ingested sequentially
+    //   1 = single-threaded     - best when many instances transcode in parallel
+    //                             (concurrent DICOMweb pull / STOW), avoids
+    //                             oversubscribing cores
+    //   N = that many threads
+    // Multi-frame instances are unaffected (always one single-threaded frame per
+    // pool worker).
+    int encodeThreads = 0;
+
+    // Resolve encodeThreads into the codec's worker-thread convention
+    // (0 -> -1 = libjxl default).
+    int SingleFrameThreads() const { return encodeThreads == 0 ? -1 : encodeThreads; }
 
     // Get encode options with center coordinates applied
     EncodeOptions GetEncodeOptions(uint32_t imageWidth, uint32_t imageHeight) const;
