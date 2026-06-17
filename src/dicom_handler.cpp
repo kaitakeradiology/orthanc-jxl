@@ -32,6 +32,26 @@
 
 namespace orthanc_jxl {
 
+namespace {
+
+// Map a DICOM transfer syntax UID to the DCMTK enum plus its VR encoding type.
+// Throws DicomHandlerError for syntaxes this plugin does not write.
+E_TransferSyntax MapTransferSyntax(const std::string& uid, E_EncodingType& encType) {
+    encType = EET_ExplicitLength;
+    if (uid == TS_JPEG_XL_LOSSLESS)              return EXS_JPEGXLLossless;
+    if (uid == TS_JPEG_XL_JPEG_RECOMPRESSION)    return EXS_JPEGXLJPEGRecompression;
+    if (uid == TS_JPEG_XL)                       return EXS_JPEGXL;
+    if (uid == TS_LITTLE_ENDIAN_EXPLICIT)        return EXS_LittleEndianExplicit;
+    if (uid == TS_BIG_ENDIAN_EXPLICIT)           return EXS_BigEndianExplicit;
+    if (uid == TS_LITTLE_ENDIAN_IMPLICIT) {
+        encType = EET_UndefinedLength;  // Implicit VR uses undefined length
+        return EXS_LittleEndianImplicit;
+    }
+    throw DicomHandlerError("Unsupported transfer syntax: " + uid);
+}
+
+}  // namespace
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -92,7 +112,7 @@ DicomImageInfo DicomHandler::GetImageInfo() const {
     DicomImageInfo info;
     Uint16 rows = 0, cols = 0;
     Uint16 bits = 0, stored = 0, high = 0, spp = 0;
-    Uint16 pixelRep = 0;
+    Uint16 pixelRep = 0, planar = 0;
 
     dataset->findAndGetUint16(DCM_Rows, rows);
     dataset->findAndGetUint16(DCM_Columns, cols);
@@ -101,6 +121,7 @@ DicomImageInfo DicomHandler::GetImageInfo() const {
     dataset->findAndGetUint16(DCM_HighBit, high);
     dataset->findAndGetUint16(DCM_SamplesPerPixel, spp);
     dataset->findAndGetUint16(DCM_PixelRepresentation, pixelRep);
+    dataset->findAndGetUint16(DCM_PlanarConfiguration, planar);
 
     info.width = cols;
     info.height = rows;
@@ -109,6 +130,24 @@ DicomImageInfo DicomHandler::GetImageInfo() const {
     info.highBit = high;
     info.samplesPerPixel = spp;
     info.isSigned = (pixelRep != 0);
+    info.planarConfiguration = planar;
+
+    // NumberOfFrames is type IS (string); default to 1 when absent.
+    Sint32 frames = 0;
+    if (dataset->findAndGetSint32(DCM_NumberOfFrames, frames).good() && frames > 0) {
+        info.numberOfFrames = static_cast<uint32_t>(frames);
+    }
+
+    OFString photometric;
+    if (dataset->findAndGetOFString(DCM_PhotometricInterpretation, photometric).good()) {
+        info.photometricInterpretation = std::string(photometric.c_str());
+        // Trim trailing whitespace/padding that DICOM CS values may carry.
+        while (!info.photometricInterpretation.empty() &&
+               (info.photometricInterpretation.back() == ' ' ||
+                info.photometricInterpretation.back() == '\0')) {
+            info.photometricInterpretation.pop_back();
+        }
+    }
 
     return info;
 }
@@ -194,17 +233,46 @@ std::vector<uint8_t> DicomHandler::GetEncapsulatedData(uint32_t frameIndex) cons
     return std::vector<uint8_t>(fragmentData, fragmentData + fragmentLength);
 }
 
+uint32_t DicomHandler::GetEncapsulatedFrameCount() const {
+    DcmDataset* dataset = fileFormat_->getDataset();
+
+    DcmElement* pixelElement = nullptr;
+    if (dataset->findAndGetElement(DCM_PixelData, pixelElement).bad() || !pixelElement) {
+        throw DicomHandlerError("No pixel data found in DICOM file");
+    }
+
+    DcmPixelData* pixelData = OFstatic_cast(DcmPixelData*, pixelElement);
+
+    E_TransferSyntax xferSyntax = EXS_Unknown;
+    const DcmRepresentationParameter* repParam = nullptr;
+    pixelData->getOriginalRepresentationKey(xferSyntax, repParam);
+
+    DcmPixelSequence* pixelSequence = nullptr;
+    if (pixelData->getEncapsulatedRepresentation(xferSyntax, repParam, pixelSequence).bad()
+        || !pixelSequence) {
+        throw DicomHandlerError("Failed to get encapsulated pixel data");
+    }
+
+    // We always write exactly one fragment per frame, so the frame count is the
+    // number of items minus the Basic Offset Table (item 0).
+    unsigned long card = pixelSequence->card();
+    return card > 0 ? static_cast<uint32_t>(card - 1) : 0;
+}
+
 // ============================================================================
 // Modification
 // ============================================================================
 
-void DicomHandler::SetJxlPixelData(const std::vector<uint8_t>& jxlData) {
-    SetJxlPixelData(jxlData.data(), jxlData.size());
-}
+void DicomHandler::SetEncapsulatedFrames(const std::vector<std::vector<uint8_t>>& frames,
+                                         const std::string& transferSyntaxUid) {
+    if (frames.empty()) {
+        throw DicomHandlerError("No frames to store");
+    }
 
-void DicomHandler::SetJxlPixelData(const uint8_t* data, size_t size) {
-    if (!data || size == 0) {
-        throw DicomHandlerError("Invalid JXL data");
+    E_EncodingType encType = EET_ExplicitLength;
+    E_TransferSyntax xfer = MapTransferSyntax(transferSyntaxUid, encType);
+    if (!IsJxlTransferSyntax(transferSyntaxUid)) {
+        throw DicomHandlerError("SetEncapsulatedFrames requires a JXL transfer syntax");
     }
 
     DcmDataset* dataset = fileFormat_->getDataset();
@@ -212,35 +280,42 @@ void DicomHandler::SetJxlPixelData(const uint8_t* data, size_t size) {
     // Remove existing pixel data
     delete dataset->remove(DCM_PixelData);
 
-    // Create new encapsulated pixel data
-    DcmPixelData* pixelData = new DcmPixelData(DCM_PixelData);
+    auto pixelData = std::make_unique<DcmPixelData>(DCM_PixelData);
+    auto pixelSequence = std::make_unique<DcmPixelSequence>(DCM_PixelSequenceTag);
 
-    // Create pixel sequence for encapsulated data
-    DcmPixelSequence* pixelSequence = new DcmPixelSequence(DCM_PixelSequenceTag);
+    // DICOM PS3.5 Annex A.4 requires a Basic Offset Table as the first item.
+    // An empty BOT is valid; with one fragment per frame, frame i maps to item i+1.
+    pixelSequence->insert(new DcmPixelItem(DCM_PixelItemTag));
 
-    // DICOM PS3.5 Annex A.4 requires Basic Offset Table as first item
-    DcmPixelItem* offsetTable = new DcmPixelItem(DCM_PixelItemTag);
-    pixelSequence->insert(offsetTable);
-
-    // Create fragment with JXL data (second item after offset table)
-    DcmPixelItem* fragment = new DcmPixelItem(DCM_PixelItemTag);
-    OFCondition status = fragment->putUint8Array(data, static_cast<unsigned long>(size));
-    if (status.bad()) {
-        delete fragment;  // Not yet inserted, must delete manually
-        delete pixelSequence;
-        delete pixelData;
-        throw DicomHandlerError("Failed to store JXL data in fragment");
+    for (const auto& frame : frames) {
+        if (frame.empty()) {
+            throw DicomHandlerError("Empty encoded frame");
+        }
+        auto fragment = std::make_unique<DcmPixelItem>(DCM_PixelItemTag);
+        OFCondition status = fragment->putUint8Array(
+            frame.data(), static_cast<unsigned long>(frame.size()));
+        if (status.bad()) {
+            throw DicomHandlerError("Failed to store encoded data in fragment");
+        }
+        pixelSequence->insert(fragment.release());  // Sequence takes ownership
     }
-    pixelSequence->insert(fragment);  // Sequence takes ownership
 
-    // Put sequence into pixel data element
-    pixelData->putOriginalRepresentation(EXS_JPEGXLLossless, nullptr, pixelSequence);
+    // Transfer ownership of the sequence to the pixel data element.
+    pixelData->putOriginalRepresentation(xfer, nullptr, pixelSequence.release());
 
-    // Insert into dataset
-    status = dataset->insert(pixelData);
+    DcmPixelData* rawPixelData = pixelData.release();
+    OFCondition status = dataset->insert(rawPixelData, OFTrue /* replaceOld */);
     if (status.bad()) {
-        delete pixelData;
+        delete rawPixelData;
         throw DicomHandlerError("Failed to insert pixel data into dataset");
+    }
+}
+
+void DicomHandler::SetUint16(uint16_t group, uint16_t element, uint16_t value) {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    OFCondition status = dataset->putAndInsertUint16(DcmTagKey(group, element), value);
+    if (status.bad()) {
+        throw DicomHandlerError("Failed to set DICOM tag");
     }
 }
 
@@ -291,32 +366,13 @@ void DicomHandler::SetTransferSyntax(const std::string& transferSyntaxUid) {
 
 std::vector<uint8_t> DicomHandler::WriteToBuffer(const std::string& transferSyntaxUid) const {
     // Determine transfer syntax
-    E_TransferSyntax xfer = EXS_Unknown;
     E_EncodingType encType = EET_ExplicitLength;
-
-    if (transferSyntaxUid == TS_JPEG_XL_LOSSLESS) {
-        xfer = EXS_JPEGXLLossless;
-    } else if (transferSyntaxUid == TS_JPEG_XL_JPEG_RECOMPRESSION) {
-        xfer = EXS_JPEGXLJPEGRecompression;
-    } else if (transferSyntaxUid == TS_JPEG_XL) {
-        xfer = EXS_JPEGXL;
-    } else if (transferSyntaxUid == TS_LITTLE_ENDIAN_EXPLICIT) {
-        xfer = EXS_LittleEndianExplicit;
-    } else if (transferSyntaxUid == TS_BIG_ENDIAN_EXPLICIT) {
-        xfer = EXS_BigEndianExplicit;
-    } else if (transferSyntaxUid == TS_LITTLE_ENDIAN_IMPLICIT) {
-        xfer = EXS_LittleEndianImplicit;
-        encType = EET_UndefinedLength;  // Implicit VR uses undefined length
-    } else {
-        throw DicomHandlerError("Unsupported transfer syntax: " + transferSyntaxUid);
-    }
+    E_TransferSyntax xfer = MapTransferSyntax(transferSyntaxUid, encType);
 
     DcmDataset* dataset = fileFormat_->getDataset();
 
     // For compressed syntaxes, choose the correct pixel data representation
-    if (transferSyntaxUid == TS_JPEG_XL_LOSSLESS ||
-        transferSyntaxUid == TS_JPEG_XL_JPEG_RECOMPRESSION ||
-        transferSyntaxUid == TS_JPEG_XL) {
+    if (IsJxlTransferSyntax(transferSyntaxUid)) {
         DcmElement* pixelElement = nullptr;
         OFCondition status = dataset->findAndGetElement(DCM_PixelData, pixelElement);
         if (status.good() && pixelElement) {

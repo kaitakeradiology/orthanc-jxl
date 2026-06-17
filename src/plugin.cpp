@@ -22,16 +22,25 @@
 #include "dicom_handler.h"
 #include "transfer_syntax.h"
 #include "config.h"
+#include "thread_pool.h"
+#include "transcode.h"
 #include "version.h"
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace orthanc_jxl;
 
 static OrthancPluginContext* context_ = nullptr;
 static PluginConfig pluginConfig_;
+
+// Shared worker pool for frame-level parallelism, reused for the plugin's
+// lifetime so study imports don't pay per-instance thread-pool setup costs.
+static std::unique_ptr<ThreadPool> threadPool_;
 
 // ============================================================================
 // Decode Image Callback
@@ -154,32 +163,21 @@ static OrthancPluginErrorCode TranscoderCallback(
 
         // Case 1: Source is JXL and uncompressed output is requested (FROM-JXL)
         if (IsJxlTransferSyntax(currentTs) && uncompressedSyntax) {
-            // Extract encapsulated JXL data
-            std::vector<uint8_t> jxlData = handler.GetEncapsulatedData(0);
+            TranscodeResult result = TranscodeFromJxl(
+                buffer, static_cast<size_t>(size), uncompressedSyntax, *threadPool_);
 
-            // Decode JXL
-            auto [pixels, jxlInfo] = JxlCodec::Decode(jxlData);
-
-            // Set native pixel data
-            handler.SetNativePixelData(pixels);
-            handler.SetTransferSyntax(uncompressedSyntax);
-
-            // Write to buffer
-            std::vector<uint8_t> output = handler.WriteToBuffer(uncompressedSyntax);
-
-            // Allocate Orthanc buffer
-            if (OrthancPluginCreateMemoryBuffer(context_, transcoded, output.size())
+            if (OrthancPluginCreateMemoryBuffer(context_, transcoded, result.dicom.size())
                 != OrthancPluginErrorCode_Success) {
                 OrthancPluginLogError(context_, "orthanc-jxl: Failed to allocate output buffer");
                 return OrthancPluginErrorCode_Plugin;
             }
-
-            memcpy(transcoded->data, output.data(), output.size());
+            memcpy(transcoded->data, result.dicom.data(), result.dicom.size());
 
             char logMsg[256];
             snprintf(logMsg, sizeof(logMsg),
-                "orthanc-jxl: Transcoded FROM JXL %zu KB -> %zu KB",
-                jxlData.size() / 1024, pixels.size() / 1024);
+                "orthanc-jxl: Transcoded FROM JXL (%u frame%s) -> %zu KB",
+                result.frameCount, result.frameCount == 1 ? "" : "s",
+                result.nativeBytes / 1024);
             OrthancPluginLogInfo(context_, logMsg);
 
             return OrthancPluginErrorCode_Success;
@@ -187,51 +185,23 @@ static OrthancPluginErrorCode TranscoderCallback(
 
         // Case 2: JXL is requested and source is not JXL (TO-JXL)
         if (jxlRequested && !IsJxlTransferSyntax(currentTs)) {
-            DicomImageInfo info = handler.GetImageInfo();
+            TranscodeResult result = TranscodeToJxl(
+                buffer, static_cast<size_t>(size), pluginConfig_, *threadPool_);
 
-            // Get raw pixels
-            std::vector<uint8_t> pixels = handler.GetPixelData();
-
-            // Determine pixel format
-            PixelFormat format;
-            if (info.samplesPerPixel == 1) {
-                format = (info.bitsAllocated <= 8) ? PixelFormat::Gray8 : PixelFormat::Gray16;
-            } else {
-                format = (info.bitsAllocated <= 8) ? PixelFormat::RGB24 : PixelFormat::RGB48;
-            }
-
-            // Encode to JXL using configured options
-            EncodeOptions opts = pluginConfig_.GetEncodeOptions(info.width, info.height);
-            std::vector<uint8_t> jxlData = JxlCodec::Encode(
-                pixels.data(),
-                info.width,
-                info.height,
-                format,
-                opts
-            );
-
-            // Set JXL pixel data in DICOM
-            handler.SetJxlPixelData(jxlData);
-            handler.SetTransferSyntax(TS_JPEG_XL_LOSSLESS);
-
-            // Write to buffer
-            std::vector<uint8_t> output = handler.WriteToBuffer(TS_JPEG_XL_LOSSLESS);
-
-            // Allocate Orthanc buffer
-            if (OrthancPluginCreateMemoryBuffer(context_, transcoded, output.size())
+            if (OrthancPluginCreateMemoryBuffer(context_, transcoded, result.dicom.size())
                 != OrthancPluginErrorCode_Success) {
                 OrthancPluginLogError(context_, "orthanc-jxl: Failed to allocate output buffer");
                 return OrthancPluginErrorCode_Plugin;
             }
+            memcpy(transcoded->data, result.dicom.data(), result.dicom.size());
 
-            memcpy(transcoded->data, output.data(), output.size());
-
-            // Log compression stats
-            double ratio = static_cast<double>(pixels.size()) / jxlData.size();
+            double ratio = result.encodedBytes
+                ? static_cast<double>(result.nativeBytes) / result.encodedBytes : 0.0;
             char logMsg[256];
             snprintf(logMsg, sizeof(logMsg),
-                "orthanc-jxl: Transcoded TO JXL %zu KB -> %zu KB (%.2fx)",
-                pixels.size() / 1024, jxlData.size() / 1024, ratio);
+                "orthanc-jxl: Transcoded TO JXL (%u frame%s) %zu KB -> %zu KB (%.2fx)",
+                result.frameCount, result.frameCount == 1 ? "" : "s",
+                result.nativeBytes / 1024, result.encodedBytes / 1024, ratio);
             OrthancPluginLogInfo(context_, logMsg);
 
             return OrthancPluginErrorCode_Success;
@@ -268,6 +238,10 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
     }
 
     OrthancPluginSetDescription2(context, PLUGIN_NAME, PLUGIN_DESCRIPTION);
+
+    // Create the shared worker pool for frame-level parallelism.
+    unsigned int hw = std::thread::hardware_concurrency();
+    threadPool_ = std::make_unique<ThreadPool>(hw == 0 ? 1u : hw);
 
     // Parse plugin configuration
     char* configJson = OrthancPluginGetConfiguration(context);
@@ -309,6 +283,7 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
 
 ORTHANC_PLUGINS_API void OrthancPluginFinalize()
 {
+    threadPool_.reset();
     OrthancPluginLogInfo(context_, "orthanc-jxl: Plugin finalized");
     context_ = nullptr;
 }
