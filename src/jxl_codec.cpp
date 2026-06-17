@@ -68,6 +68,35 @@ constexpr PixelFormatInfo kFormatInfo[] = {
 inline const PixelFormatInfo& GetFormatInfo(PixelFormat format) {
     return kFormatInfo[static_cast<int>(format)];
 }
+
+// Resolve the requested worker count into an actual libjxl worker-thread count.
+// Returns 0 when no parallel runner should be used (single-threaded).
+size_t ResolveThreadCount(int numWorkerThreads) {
+    if (numWorkerThreads < 0) {
+        return JxlThreadParallelRunnerDefaultNumWorkerThreads();
+    }
+    if (numWorkerThreads <= 1) {
+        return 0;  // No runner; libjxl runs on the calling thread.
+    }
+    return static_cast<size_t>(numWorkerThreads);
+}
+
+// Return a libjxl parallel runner cached on the calling thread, (re)sized on
+// demand. Reusing the runner avoids creating and destroying an OS thread pool
+// on every encode/decode call - important when importing large studies.
+// Returns nullptr when single-threaded operation was requested.
+void* GetThreadLocalRunner(size_t numThreads) {
+    if (numThreads == 0) {
+        return nullptr;
+    }
+    thread_local JxlThreadParallelRunnerPtr runner;
+    thread_local size_t cachedThreads = 0;
+    if (!runner || cachedThreads != numThreads) {
+        runner = JxlThreadParallelRunnerMake(nullptr, numThreads);
+        cachedThreads = numThreads;
+    }
+    return runner.get();
+}
 } // anonymous namespace
 
 int JxlCodec::BytesPerPixel(PixelFormat format) { return GetFormatInfo(format).bytesPerPixel; }
@@ -95,7 +124,8 @@ std::vector<uint8_t> JxlCodec::Encode(
     uint32_t width,
     uint32_t height,
     PixelFormat format,
-    const EncodeOptions& options)
+    const EncodeOptions& options,
+    int numWorkerThreads)
 {
     // Create encoder with RAII wrapper
     auto encoder = JxlEncoderMake(nullptr);
@@ -103,15 +133,12 @@ std::vector<uint8_t> JxlCodec::Encode(
         throw JxlCodecError("Failed to create JXL encoder");
     }
 
-    // Set up parallel runner for multi-threaded encoding
-    auto runner = JxlThreadParallelRunnerMake(
-        nullptr,
-        JxlThreadParallelRunnerDefaultNumWorkerThreads()
-    );
+    // Reuse a thread-local parallel runner (avoids per-call pool churn)
+    void* runner = GetThreadLocalRunner(ResolveThreadCount(numWorkerThreads));
     if (runner) {
         if (JxlEncoderSetParallelRunner(encoder.get(),
                                         JxlThreadParallelRunner,
-                                        runner.get()) != JXL_ENC_SUCCESS) {
+                                        runner) != JXL_ENC_SUCCESS) {
             throw JxlCodecError("Failed to set parallel runner");
         }
     }
@@ -313,20 +340,18 @@ ImageInfo JxlCodec::DecodeInfo(const std::vector<uint8_t>& jxlData) {
 
 std::vector<uint8_t> JxlCodec::Decode(
     const uint8_t* data, size_t size,
-    PixelFormat outputFormat)
+    PixelFormat outputFormat,
+    int numWorkerThreads)
 {
     auto decoder = JxlDecoderMake(nullptr);
     if (!decoder) {
         throw JxlCodecError("Failed to create JXL decoder");
     }
 
-    // Set up parallel runner
-    auto runner = JxlThreadParallelRunnerMake(
-        nullptr,
-        JxlThreadParallelRunnerDefaultNumWorkerThreads()
-    );
+    // Reuse a thread-local parallel runner (avoids per-call pool churn)
+    void* runner = GetThreadLocalRunner(ResolveThreadCount(numWorkerThreads));
     if (runner) {
-        JxlDecoderSetParallelRunner(decoder.get(), JxlThreadParallelRunner, runner.get());
+        JxlDecoderSetParallelRunner(decoder.get(), JxlThreadParallelRunner, runner);
     }
 
     if (JxlDecoderSubscribeEvents(decoder.get(),
@@ -403,23 +428,26 @@ std::vector<uint8_t> JxlCodec::Decode(
 
 std::vector<uint8_t> JxlCodec::Decode(
     const std::vector<uint8_t>& jxlData,
-    PixelFormat outputFormat)
+    PixelFormat outputFormat,
+    int numWorkerThreads)
 {
-    return Decode(jxlData.data(), jxlData.size(), outputFormat);
+    return Decode(jxlData.data(), jxlData.size(), outputFormat, numWorkerThreads);
 }
 
 std::pair<std::vector<uint8_t>, ImageInfo> JxlCodec::Decode(
-    const uint8_t* data, size_t size)
+    const uint8_t* data, size_t size,
+    int numWorkerThreads)
 {
     ImageInfo info = DecodeInfo(data, size);
-    std::vector<uint8_t> pixels = Decode(data, size, FormatFromImageInfo(info));
+    std::vector<uint8_t> pixels = Decode(data, size, FormatFromImageInfo(info), numWorkerThreads);
     return {std::move(pixels), info};
 }
 
 std::pair<std::vector<uint8_t>, ImageInfo> JxlCodec::Decode(
-    const std::vector<uint8_t>& jxlData)
+    const std::vector<uint8_t>& jxlData,
+    int numWorkerThreads)
 {
-    return Decode(jxlData.data(), jxlData.size());
+    return Decode(jxlData.data(), jxlData.size(), numWorkerThreads);
 }
 
 } // namespace orthanc_jxl

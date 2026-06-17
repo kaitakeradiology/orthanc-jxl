@@ -70,13 +70,22 @@ struct ImageInfo {
 
 class JxlCodec {
 public:
+    // Worker-thread count semantics shared by Encode/Decode:
+    //   < 0  -> libjxl default (one worker per hardware thread)
+    //   0/1  -> single-threaded, no parallel runner allocated
+    //   > 1  -> that many libjxl worker threads
+    // Runners are cached thread-locally and reused across calls.
+    static constexpr int kDefaultThreads = -1;
+    static constexpr int kSingleThreaded = 1;
+
     // Encoding
     static std::vector<uint8_t> Encode(
         const void* pixelData,
         uint32_t width,
         uint32_t height,
         PixelFormat format,
-        const EncodeOptions& options = EncodeOptions::ProgressiveLossless()
+        const EncodeOptions& options = EncodeOptions::ProgressiveLossless(),
+        int numWorkerThreads = kDefaultThreads
     );
 
     // Convenience encoders
@@ -97,19 +106,23 @@ public:
     // Decoding - full decode with specified format
     static std::vector<uint8_t> Decode(
         const uint8_t* data, size_t size,
-        PixelFormat outputFormat
+        PixelFormat outputFormat,
+        int numWorkerThreads = kDefaultThreads
     );
     static std::vector<uint8_t> Decode(
         const std::vector<uint8_t>& jxlData,
-        PixelFormat outputFormat
+        PixelFormat outputFormat,
+        int numWorkerThreads = kDefaultThreads
     );
 
     // Decoding - auto-detect format
     static std::pair<std::vector<uint8_t>, ImageInfo> Decode(
-        const uint8_t* data, size_t size
+        const uint8_t* data, size_t size,
+        int numWorkerThreads = kDefaultThreads
     );
     static std::pair<std::vector<uint8_t>, ImageInfo> Decode(
-        const std::vector<uint8_t>& jxlData
+        const std::vector<uint8_t>& jxlData,
+        int numWorkerThreads = kDefaultThreads
     );
 
     // Helpers
