@@ -37,8 +37,15 @@ struct TranscodeResult {
 
 // Encode an uncompressed/legacy DICOM instance to JPEG-XL. Frames are encoded
 // in parallel on the supplied pool. Throws on malformed input.
+//
+// singleFrameThreads controls libjxl's internal worker count for single-frame
+// instances: < 0 uses libjxl's default (one per core), 1 forces single-threaded
+// so that ingest-level concurrency, not nested threads, fills the cores.
+// Multi-frame instances always encode one (single-threaded) frame per pool
+// worker regardless of this value.
 TranscodeResult TranscodeToJxl(const void* dicom, size_t size,
-                               const PluginConfig& config, ThreadPool& pool);
+                               const PluginConfig& config, ThreadPool& pool,
+                               int singleFrameThreads = -1);
 
 // Decode a JPEG-XL DICOM instance back to the given uncompressed transfer
 // syntax. Frames are decoded in parallel on the supplied pool.

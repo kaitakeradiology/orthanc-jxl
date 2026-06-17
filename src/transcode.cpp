@@ -38,7 +38,8 @@ PixelFormat PixelFormatFor(const DicomImageInfo& info) {
 }  // namespace
 
 TranscodeResult TranscodeToJxl(const void* dicom, size_t size,
-                               const PluginConfig& config, ThreadPool& pool) {
+                               const PluginConfig& config, ThreadPool& pool,
+                               int singleFrameThreads) {
     DicomHandler handler(dicom, size);
 
     DicomImageInfo info = handler.GetImageInfo();
@@ -68,10 +69,10 @@ TranscodeResult TranscodeToJxl(const void* dicom, size_t size,
     const std::string outTs = lossy ? TS_JPEG_XL : TS_JPEG_XL_LOSSLESS;
 
     // Frame-parallel: encode each frame single-threaded so the shared pool, not
-    // nested libjxl runners, is the sole source of threads. A lone frame uses
-    // libjxl's own threads instead.
+    // nested libjxl runners, is the sole source of threads. A lone frame falls
+    // back to libjxl's own threads (overridable for ingest-concurrency tuning).
     const int frameThreads = (frameCount > 1)
-        ? JxlCodec::kSingleThreaded : JxlCodec::kDefaultThreads;
+        ? JxlCodec::kSingleThreaded : singleFrameThreads;
 
     std::vector<std::vector<uint8_t>> encoded(frameCount);
     ParallelFor(pool, frameCount, [&](size_t f) {
