@@ -1,6 +1,7 @@
 # Build output
 builddir/
 build/
+.build/
 
 # Meson subprojects (downloaded dependencies)
 subprojects/*
