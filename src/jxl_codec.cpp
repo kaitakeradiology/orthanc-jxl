@@ -160,13 +160,26 @@ std::vector<uint8_t> JxlCodec::Encode(
         throw JxlCodecError("Failed to set basic info");
     }
 
-    // Set color encoding
+    // Describe the colour encoding. For lossless (modular + uses_original_profile)
+    // this is metadata only - the integer samples are stored verbatim and no
+    // transform is applied. It does matter for the lossy VarDCT path, so pick a
+    // transfer function that matches the source rather than asserting one value
+    // for everything:
+    //   - grayscale medical data holds raw, linear-in-stored-units intensities
+    //     (display is driven by the DICOM modality LUT / Rescale / Window, not
+    //     an embedded profile), so signal LINEAR;
+    //   - DICOM RGB without an ICC profile is assumed sRGB display data.
+    // libjxl requires a known transfer function here (UNKNOWN is rejected when
+    // uses_original_profile is set). Use RELATIVE (colorimetric) intent, which
+    // suits measured data better than PERCEPTUAL.
+    const bool gray = IsGrayscale(format);
     JxlColorEncoding colorEncoding = {};
-    colorEncoding.color_space = IsGrayscale(format) ? JXL_COLOR_SPACE_GRAY : JXL_COLOR_SPACE_RGB;
+    colorEncoding.color_space = gray ? JXL_COLOR_SPACE_GRAY : JXL_COLOR_SPACE_RGB;
     colorEncoding.white_point = JXL_WHITE_POINT_D65;
-    colorEncoding.primaries = JXL_PRIMARIES_SRGB;
-    colorEncoding.transfer_function = JXL_TRANSFER_FUNCTION_LINEAR;  // Linear for medical imaging
-    colorEncoding.rendering_intent = JXL_RENDERING_INTENT_PERCEPTUAL;
+    colorEncoding.primaries = JXL_PRIMARIES_SRGB;  // ignored for grayscale
+    colorEncoding.transfer_function =
+        gray ? JXL_TRANSFER_FUNCTION_LINEAR : JXL_TRANSFER_FUNCTION_SRGB;
+    colorEncoding.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
 
     if (JxlEncoderSetColorEncoding(encoder.get(), &colorEncoding) != JXL_ENC_SUCCESS) {
         throw JxlCodecError("Failed to set color encoding");
