@@ -3,6 +3,7 @@ plugin_sources = files(
   'plugin.cpp',
   'jxl_codec.cpp',
   'dicom_handler.cpp',
+  'transcode.cpp',
   'config.cpp'
 )
 
