@@ -20,7 +20,9 @@ The plugin implements the official DICOM Transfer Syntax UIDs defined in PS3.5 2
 
 - Center-first group ordering for streaming applications
 - 8-bit and 16-bit grayscale/RGB pixel formats
-- Parallel encoding via libjxl thread runner
+- Multi-frame instances (one encapsulated fragment per frame)
+- Planar (PlanarConfiguration 1) and big-endian source normalization
+- Frame-level parallel encoding/decoding across a shared worker pool
 
 ## Requirements
 
