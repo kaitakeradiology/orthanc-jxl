@@ -208,6 +208,25 @@ static OrthancPluginErrorCode TranscoderCallback(
             return OrthancPluginErrorCode_Success;
         }
 
+        // Case 3: Identity - a stored JXL instance is requested in its own
+        // transfer syntax (serve / forward / stream). Orthanc still routes this
+        // through the transcoder; pass the source through unchanged rather than
+        // declining, because declining makes Orthanc core throw "Unsupported
+        // transfer syntax".
+        if (IsJxlTransferSyntax(currentTs)) {
+            for (uint32_t i = 0; i < countSyntaxes; ++i) {
+                if (currentTs == allowedSyntaxes[i]) {
+                    if (OrthancPluginCreateMemoryBuffer(context_, transcoded,
+                            static_cast<uint32_t>(size)) != OrthancPluginErrorCode_Success) {
+                        OrthancPluginLogError(context_, "orthanc-jxl: identity buffer alloc failed");
+                        return OrthancPluginErrorCode_Plugin;
+                    }
+                    memcpy(transcoded->data, buffer, static_cast<size_t>(size));
+                    return OrthancPluginErrorCode_Success;
+                }
+            }
+        }
+
         // Not our job
         return OrthancPluginErrorCode_NotImplemented;
 
