@@ -11,7 +11,7 @@ plugin_sources = files(
 orthanc_jxl = shared_library('OrthancJxl',
   sources: plugin_sources,
   include_directories: [inc_dirs],
-  dependencies: [jxl_dep, jxl_threads_dep, dcmtk_dep, json_dep],
+  dependencies: [jxl_dep, jxl_threads_dep, dcmtk_dep, json_dep, orthanc_sdk_dep],
   cpp_args: ['-I' + meson.project_build_root()],
   name_prefix: 'lib',
   install: true,

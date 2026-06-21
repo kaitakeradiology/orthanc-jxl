@@ -1,2 +1,7 @@
 option('tests', type: 'boolean', value: false,
   description: 'Build unit tests')
+
+option('orthanc_sdk_include', type: 'string', value: '',
+  description: 'Path to a directory containing orthanc/OrthancCPlugin.h. '
+    + 'If empty, the system header is used when present, otherwise the pinned '
+    + 'SDK header is fetched at configure time.')
