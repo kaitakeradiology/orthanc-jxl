@@ -26,7 +26,7 @@ The plugin implements the official DICOM Transfer Syntax UIDs defined in PS3.5 2
 
 ## Requirements
 
-**Orthanc with JPEG-XL transfer syntax support** - requires Orthanc revision [e94178d6b6a2](https://orthanc.uclouvain.be/hg/orthanc/rev/e94178d6b6a2) (2025-12-09) or later.
+**Orthanc with JPEG-XL transfer syntax support** - requires Orthanc **1.12.10** or later, the release that introduced the JPEG-XL transfer syntaxes.
 
 ## Building
 
@@ -36,7 +36,16 @@ The plugin implements the official DICOM Transfer Syntax UIDs defined in PS3.5 2
 - [Meson](https://mesonbuild.com/) build system (>= 0.50)
 - [libjxl](https://github.com/libjxl/libjxl) (>= 0.8)
 - [DCMTK](https://dicom.offis.de/dcmtk) (>= 3.6.7)
-- [Orthanc](https://www.orthanc-server.com/) (>= e94178d6b6a2, see Requirements)
+- [Orthanc](https://www.orthanc-server.com/) (>= 1.12.10) at runtime; see Requirements
+
+The Orthanc plugin SDK header (`OrthancCPlugin.h`) is resolved automatically: an
+installed system header is used if present, otherwise the pinned 1.12.10 header is
+downloaded (and SHA-256 verified) at `meson setup` time. To build fully offline or
+against a custom SDK, point meson at a directory containing `orthanc/OrthancCPlugin.h`:
+
+```bash
+meson setup build -Dorthanc_sdk_include=/path/to/sdk/include
+```
 
 #### Debian/Ubuntu
 

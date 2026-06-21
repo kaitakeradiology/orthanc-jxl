@@ -1,5 +1,5 @@
 project('orthanc-jxl', 'cpp',
-  version : '0.2.1',
+  version : '0.3.0',
   license : 'GPL-3.0-or-later',
   default_options : [
     'cpp_std=c++17',
@@ -37,9 +37,29 @@ if not dcmtk_found_via_pkg
   )
 endif
 
-# Orthanc SDK (header-only, system-installed)
-# Use compiler argument for system include path
-add_project_arguments('-I/usr/include/orthanc', language: 'cpp')
+# Orthanc plugin SDK (header-only: orthanc/OrthancCPlugin.h)
+# Resolution order: explicit override -> system header -> pinned configure-time fetch.
+orthanc_sdk_override = get_option('orthanc_sdk_include')
+if orthanc_sdk_override != ''
+  # Arbitrary (typically absolute, out-of-tree) SDK location: use a raw -I so meson
+  # does not reject absolute paths the way include_directories() does.
+  orthanc_sdk_dep = declare_dependency(compile_args: ['-I' + orthanc_sdk_override])
+  orthanc_sdk_source = 'override (' + orthanc_sdk_override + ')'
+elif cpp.has_header('orthanc/OrthancCPlugin.h')
+  orthanc_sdk_dep = declare_dependency()
+  orthanc_sdk_source = 'system'
+else
+  orthanc_sdk_dir = meson.current_source_dir() / 'third_party' / 'orthanc-sdk'
+  run_command(
+    find_program('python3'),
+    meson.current_source_dir() / 'scripts' / 'fetch_orthanc_sdk.py',
+    '--dest', orthanc_sdk_dir,
+    check: true,
+  )
+  orthanc_sdk_dep = declare_dependency(
+    include_directories: include_directories('third_party' / 'orthanc-sdk'))
+  orthanc_sdk_source = 'fetched (1.12.10)'
+endif
 
 # Version header
 version_data = configuration_data()
@@ -68,6 +88,7 @@ endif
 # Summary
 summary({
   'Version': meson.project_version(),
+  'Orthanc SDK': orthanc_sdk_source,
   'libjxl': jxl_dep.version(),
   'DCMTK': dcmtk_found_via_pkg ? dcmtk_dep.version() : 'manual',
   'Build type': get_option('buildtype'),

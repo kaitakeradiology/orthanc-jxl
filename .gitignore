@@ -7,6 +7,9 @@ build/
 subprojects/*
 !subprojects/*.wrap
 
+# Fetched Orthanc plugin SDK header (see scripts/fetch_orthanc_sdk.py)
+third_party/
+
 # Editor/IDE
 .vscode/
 .idea/
