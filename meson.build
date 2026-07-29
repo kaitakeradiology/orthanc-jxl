@@ -26,9 +26,16 @@ json_dep = dependency('nlohmann_json', fallback: ['nlohmann_json', 'nlohmann_jso
 dcmtk_dep = dependency('dcmtk', method: 'pkg-config', required: false)
 dcmtk_found_via_pkg = dcmtk_dep.found()
 if not dcmtk_found_via_pkg
-  # Manual fallback for systems without pkg-config
+  # Manual fallback for systems without a usable dcmtk.pc (e.g. its sndfile
+  # Requires is unmet). dcmjpeg/dcmjpls provide the compressed-source decoders
+  # (JPEG / JPEG-LS) registered in plugin.cpp; their transitive deps (libijg*,
+  # libdcmtkcharls) are pulled at load time via each .so's NEEDED entries.
   dcmtk_dep = declare_dependency(
     dependencies: [
+      cpp.find_library('dcmjpeg'),
+      cpp.find_library('dcmjpls'),
+      cpp.find_library('dcmimage'),
+      cpp.find_library('dcmimgle'),
       cpp.find_library('dcmdata'),
       cpp.find_library('ofstd'),
       cpp.find_library('oflog'),

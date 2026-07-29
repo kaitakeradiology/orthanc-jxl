@@ -26,6 +26,13 @@
 #include "transcode.h"
 #include "version.h"
 
+// DCMTK decoders for compressed sources (JPEG, JPEG-LS). The plugin links its
+// own dynamic libdcmdata whose codec registry is SEPARATE from Orthanc's
+// (statically-linked) DCMTK, so we must register these ourselves for
+// chooseRepresentation() to decode compressed inputs before JXL-encoding.
+#include <dcmtk/dcmjpeg/djdecode.h>
+#include <dcmtk/dcmjpls/djdecode.h>
+
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -185,9 +192,21 @@ static OrthancPluginErrorCode TranscoderCallback(
 
         // Case 2: JXL is requested and source is not JXL (TO-JXL)
         if (jxlRequested && !IsJxlTransferSyntax(currentTs)) {
-            TranscodeResult result = TranscodeToJxl(
-                buffer, static_cast<size_t>(size), pluginConfig_, *threadPool_,
-                pluginConfig_.SingleFrameThreads());
+            TranscodeResult result;
+            try {
+                result = TranscodeToJxl(
+                    buffer, static_cast<size_t>(size), pluginConfig_, *threadPool_,
+                    pluginConfig_.SingleFrameThreads());
+            } catch (const std::exception& e) {
+                // Can't decode/encode this source (e.g. a compressed syntax with
+                // no registered decoder, such as JPEG2000). Decline so Orthanc
+                // keeps the original instance (ingest) or reports it cannot
+                // transcode (/modify), instead of failing the whole operation —
+                // important once IngestTranscodingOfCompressed is enabled.
+                OrthancPluginLogWarning(context_,
+                    (std::string("orthanc-jxl: declining TO-JXL (") + e.what() + ")").c_str());
+                return OrthancPluginErrorCode_NotImplemented;
+            }
 
             if (OrthancPluginCreateMemoryBuffer(context_, transcoded, result.dicom.size())
                 != OrthancPluginErrorCode_Success) {
@@ -286,6 +305,11 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
         pluginConfig_.encodeThreads, threadPool_ ? (unsigned)threadPool_->Size() : 0u);
     OrthancPluginLogInfo(context, configMsg);
 
+    // Register DCMTK decoders so the transcoder can decode compressed sources
+    // (JPEG / JPEG-LS) to native before JXL-encoding. Idempotent.
+    DJDecoderRegistration::registerCodecs();
+    DJLSDecoderRegistration::registerCodecs();
+
     // Register decode callback for viewing JXL images
     OrthancPluginRegisterDecodeImageCallback(context, DecodeImageCallback);
 
@@ -304,6 +328,8 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
 
 ORTHANC_PLUGINS_API void OrthancPluginFinalize()
 {
+    DJLSDecoderRegistration::cleanup();
+    DJDecoderRegistration::cleanup();
     threadPool_.reset();
     OrthancPluginLogInfo(context_, "orthanc-jxl: Plugin finalized");
     context_ = nullptr;

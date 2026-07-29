@@ -28,7 +28,8 @@ throughput_exe = executable('jxl-throughput',
 
 test_data = meson.current_source_dir() / 'data'
 test('roundtrip', roundtrip_exe, args: [
-  test_data / 'test_ct1.dcm',                 # 512x512 16-bit single-frame CT
+  test_data / 'test_ct1.dcm',                 # 512x512 16-bit single-frame CT (uncompressed)
+  test_data / 'test_ct1_jls.dcm',             # same CT, JPEG-LS Lossless source (decode path)
   test_data / 'synthetic_mf_gray16.dcm',      # multi-frame 16-bit grayscale
   test_data / 'synthetic_mf_rgb_planar.dcm',  # multi-frame planar RGB
 ])

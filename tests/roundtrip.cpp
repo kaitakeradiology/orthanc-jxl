@@ -17,6 +17,9 @@
 #include "../src/config.h"
 #include "../src/thread_pool.h"
 
+#include <dcmtk/dcmjpeg/djdecode.h>
+#include <dcmtk/dcmjpls/djdecode.h>
+
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -67,6 +70,7 @@ static bool RunOne(const char* path, ThreadPool& pool) {
     {
         DicomHandler handler(dicom.data(), dicom.size());
         info = handler.GetImageInfo();
+        handler.EnsureUncompressed();   // decode compressed sources so the reference is native
         origPixels = handler.GetPixelData();
     }
 
@@ -147,6 +151,11 @@ int main(int argc, char* argv[]) {
 
     unsigned hw = std::thread::hardware_concurrency();
     ThreadPool pool(hw == 0 ? 1u : hw);
+
+    // Register DCMTK decoders so compressed fixtures (JPEG / JPEG-LS) decode to
+    // native before JXL-encoding (mirrors OrthancPluginInitialize).
+    DJDecoderRegistration::registerCodecs();
+    DJLSDecoderRegistration::registerCodecs();
 
     int failures = 0;
     for (int i = 1; i < argc; ++i) {

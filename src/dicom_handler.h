@@ -71,6 +71,11 @@ public:
     bool HadParseWarning() const { return parseWarning_; }
 
     // Pixel data access
+    // Decompress compressed source pixels in place to native (Little Endian
+    // Explicit) via DCMTK's registered decoders (the codec registry lives in
+    // libdcmdata, shared with Orthanc core, which registers JPEG/JPEG-LS/...).
+    // No-op if already native; throws if no decoder is available for the source.
+    void EnsureUncompressed();
     std::vector<uint8_t> GetPixelData() const;           // For uncompressed (all frames)
     std::vector<uint8_t> GetEncapsulatedData(uint32_t frameIndex = 0) const;  // For compressed
     uint32_t GetEncapsulatedFrameCount() const;          // Number of encapsulated frames

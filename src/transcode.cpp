@@ -42,6 +42,10 @@ TranscodeResult TranscodeToJxl(const void* dicom, size_t size,
                                int singleFrameThreads) {
     DicomHandler handler(dicom, size);
 
+    // Decode compressed sources (JPEG / JPEG-LS / JPEG2000-if-registered) to
+    // native before reading geometry + pixels; no-op for already-uncompressed.
+    handler.EnsureUncompressed();
+
     DicomImageInfo info = handler.GetImageInfo();
 
     const size_t frameSize = info.FrameSizeBytes();

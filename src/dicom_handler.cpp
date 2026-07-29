@@ -171,6 +171,26 @@ std::string DicomHandler::GetTransferSyntax() const {
 // Pixel Data Access
 // ============================================================================
 
+void DicomHandler::EnsureUncompressed() {
+    DcmDataset* dataset = fileFormat_->getDataset();
+
+    DcmElement* pixelElement = nullptr;
+    if (dataset->findAndGetElement(DCM_PixelData, pixelElement).bad() || !pixelElement) {
+        return;  // no pixel data (e.g. SR/KO) — nothing to decode
+    }
+
+    // Decode the source (JPEG / JPEG-LS / ... encapsulated) to native little-
+    // endian. Call chooseRepresentation on the DATASET (not the DcmPixelData
+    // element) so the codec gets the tag context it needs — the element-level
+    // call with an empty DcmStack fails "Invalid tag". No-op if already native.
+    OFCondition status = dataset->chooseRepresentation(EXS_LittleEndianExplicit, nullptr);
+    if (status.bad()) {
+        throw DicomHandlerError(
+            std::string("Failed to decode source pixel data to native: ") + status.text());
+    }
+    OFstatic_cast(DcmPixelData*, pixelElement)->removeAllButCurrentRepresentations();
+}
+
 std::vector<uint8_t> DicomHandler::GetPixelData() const {
     DcmDataset* dataset = fileFormat_->getDataset();
 
