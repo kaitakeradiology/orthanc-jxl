@@ -172,7 +172,10 @@ Build with `-Dtests=true` and run `build/tests/jxl-benchmark <dicom_file>`.
 
 ## Limitations
 
-- Single-frame images only (multi-frame support planned)
+- Compressed sources are transcoded to JXL only for transfer syntaxes with a
+  registered DCMTK decoder (uncompressed, JPEG, JPEG-LS). JPEG2000 has no DCMTK
+  decoder and is not yet supported (would need an OpenJPEG decode path); such
+  sources are declined and left in their original transfer syntax.
 - Lossless encoding only (lossy VarDCT mode planned)
 
 ## Contributing
