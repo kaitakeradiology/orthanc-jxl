@@ -16,7 +16,12 @@
 #     run; the dev ./build dir is left alone)
 #   - installs ONE file: /usr/share/orthanc/plugins/libOrthancJxl.so (the
 #     upstream orthanc packages' conventional plugin dir)
-#   - Depends: orthanc (>= 1.12.10) — the SDK header this build pins — and a
+#   - orthanc is a Recommends, not Depends: prod runs a SOURCE-BUILT mainline
+#     Orthanc over still-installed Debian 1.12.7 packages (discovered
+#     2026-08-26 — dpkg would veto a hard Depends the running server in fact
+#     satisfies). The real floor is enforced at LOAD time by
+#     OrthancPluginCheckVersion against the SDK this build pins (1.12.10).
+#   - a
 #     libjxl floor DERIVED from the soname the .so actually linked: the estate
 #     consumes libjxl from the upstream CI apt channel
 #     (artifacts.lucaversari.it …/deb/trixie/, nightlies of master), whose
@@ -73,7 +78,8 @@ Version: ${VERSION}
 Section: science
 Priority: optional
 Architecture: ${ARCH}
-Depends: orthanc (>= 1.12.10), ${JXL_DEP}
+Depends: ${JXL_DEP}
+Recommends: orthanc (>= 1.12.10)
 Maintainer: Kaitake Radiology Systems <ryan@testtoast.com>
 Description: JPEG-XL transcoding plugin for Orthanc
  Registers the JPEG XL transfer syntax (1.2.840.10008.1.2.4.110) with
