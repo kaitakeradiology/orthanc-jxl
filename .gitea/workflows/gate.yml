@@ -1,8 +1,12 @@
 name: gate
 # Build + roundtrip-test the plugin and produce the house deb on every push.
 # Runner: the estate build CT (Debian Trixie = the prod ABI target).
-# libjxl comes from the TRIXIE ARCHIVE (distro-first decision 2026-08-26:
-# 0.11.2 is security-maintained by Debian and API-verified for this plugin);
+#
+# libjxl comes from the upstream project's own CI apt channel (nightlies of
+# master, signed flat repo) — the estate's chosen source; the deb build
+# derives its libjxl Depends floor from the soname actually linked, so the
+# plugin and libjxl runtime move in lockstep by construction. Deploy both
+# together; `apt-mark hold` on prod between deliberate upgrades.
 # meson/ninja are preinstalled on the runner.
 on:
   push:
@@ -15,8 +19,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # git describe needs the tags for the deb version
-      - name: build deps (idempotent; archive libjxl)
+      - name: libjxl nightly channel + build deps (idempotent)
         run: |
+          echo 'deb [trusted=yes] https://artifacts.lucaversari.it/libjxl/libjxl/latest/deb/trixie/ ./' \
+            > /etc/apt/sources.list.d/libjxl-nightly.list
+          # TODO: pin the channel's signing key (Release.gpg exists) instead of trusted=yes
           apt-get update -qq
           apt-get install -y --no-install-recommends \
             libjxl-dev libdcmtk-dev liblcms2-dev pkg-config python3 ca-certificates >/dev/null
@@ -26,12 +33,14 @@ jobs:
           ninja -C build
       - name: roundtrip test
         run: meson test -C build --print-errorlogs
-      - name: deb
+      - name: deb (Depends derived from the linked libjxl soname)
         run: ./deploy/build-deb.sh
-      - name: linkage sanity (must be the archive soname)
+      - name: show linkage + depends
         run: |
           dpkg-deb -x deploy/orthanc-jxl_*.deb /tmp/jxlpkg
           objdump -p /tmp/jxlpkg/usr/share/orthanc/plugins/libOrthancJxl.so | grep "NEEDED.*jxl"
+          dpkg-deb -f deploy/orthanc-jxl_*.deb Depends
+          rm -rf /tmp/jxlpkg
       - uses: actions/upload-artifact@v3
         with:
           name: orthanc-jxl-deb

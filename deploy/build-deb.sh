@@ -16,10 +16,15 @@
 #     run; the dev ./build dir is left alone)
 #   - installs ONE file: /usr/share/orthanc/plugins/libOrthancJxl.so (the
 #     upstream orthanc packages' conventional plugin dir)
-#   - Depends: orthanc (>= 1.12.10) — the SDK header this build pins;
-#     libjxl0.11 | libjxl (>= 0.11) — Debian Trixie's archive package FIRST
-#     (distro security updates; API-verified 2026-08-26), the house deb name
-#     as the alternate. Build on Trixie against archive libjxl-dev.
+#   - Depends: orthanc (>= 1.12.10) — the SDK header this build pins — and a
+#     libjxl floor DERIVED from the soname the .so actually linked: the estate
+#     consumes libjxl from the upstream CI apt channel
+#     (artifacts.lucaversari.it …/deb/trixie/, nightlies of master), whose
+#     soname bumps per minor (0.12 -> 0.13), so plugin + libjxl must move in
+#     LOCKSTEP; deriving the floor at build time makes a mismatched install
+#     refuse instead of failing to load. The archive name (libjxlO.MINOR) is
+#     accepted as an alternate — the plugin API also builds against Trixie's
+#     0.11.2 (verified 2026-08-26) if the estate ever goes distro.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,6 +54,14 @@ ninja -C deploy/build-release
 SO="deploy/build-release/src/libOrthancJxl.so"
 [ -f "$SO" ] || { echo "build produced no ${SO}" >&2; exit 1; }
 
+# libjxl dependency floor from the ACTUAL linked soname (libjxl.so.0.X):
+# nightly-channel sonames move, and the deb must demand the runtime it was
+# built against rather than silently allowing an older one.
+JXL_MINOR="$(objdump -p "$SO" | sed -n 's/.*NEEDED.*libjxl\.so\.0\.\([0-9]*\).*/\1/p' | head -1)"
+[ -n "$JXL_MINOR" ] || { echo "could not read the linked libjxl soname" >&2; exit 1; }
+JXL_DEP="libjxl (>= 0.${JXL_MINOR}~) | libjxl0.${JXL_MINOR}"
+echo "linked libjxl.so.0.${JXL_MINOR} -> Depends: ${JXL_DEP}"
+
 # 2. Stage.
 rm -rf "${STAGE}"
 install -D -m 644 "$SO" "${STAGE}/usr/share/orthanc/plugins/libOrthancJxl.so"
@@ -60,7 +73,7 @@ Version: ${VERSION}
 Section: science
 Priority: optional
 Architecture: ${ARCH}
-Depends: orthanc (>= 1.12.10), libjxl0.11 | libjxl (>= 0.11)
+Depends: orthanc (>= 1.12.10), ${JXL_DEP}
 Maintainer: Kaitake Radiology Systems <ryan@testtoast.com>
 Description: JPEG-XL transcoding plugin for Orthanc
  Registers the JPEG XL transfer syntax (1.2.840.10008.1.2.4.110) with
