@@ -1,0 +1,38 @@
+name: gate
+# Build + roundtrip-test the plugin and produce the house deb on every push.
+# Runner: the estate build CT (Debian Trixie = the prod ABI target).
+# libjxl comes from the TRIXIE ARCHIVE (distro-first decision 2026-08-26:
+# 0.11.2 is security-maintained by Debian and API-verified for this plugin);
+# meson/ninja are preinstalled on the runner.
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+jobs:
+  build:
+    runs-on: build-ct
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # git describe needs the tags for the deb version
+      - name: build deps (idempotent; archive libjxl)
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            libjxl-dev libdcmtk-dev liblcms2-dev pkg-config python3 ca-certificates >/dev/null
+      - name: configure + build
+        run: |
+          meson setup build --buildtype=release
+          ninja -C build
+      - name: roundtrip test
+        run: meson test -C build --print-errorlogs
+      - name: deb
+        run: ./deploy/build-deb.sh
+      - name: linkage sanity (must be the archive soname)
+        run: |
+          dpkg-deb -x deploy/orthanc-jxl_*.deb /tmp/jxlpkg
+          objdump -p /tmp/jxlpkg/usr/share/orthanc/plugins/libOrthancJxl.so | grep "NEEDED.*jxl"
+      - uses: actions/upload-artifact@v3
+        with:
+          name: orthanc-jxl-deb
+          path: deploy/*.deb

@@ -17,7 +17,9 @@
 #   - installs ONE file: /usr/share/orthanc/plugins/libOrthancJxl.so (the
 #     upstream orthanc packages' conventional plugin dir)
 #   - Depends: orthanc (>= 1.12.10) — the SDK header this build pins;
-#     libjxl (>= 0.12) — the SONAME the plugin links (libjxl.so.0.12)
+#     libjxl0.11 | libjxl (>= 0.11) — Debian Trixie's archive package FIRST
+#     (distro security updates; API-verified 2026-08-26), the house deb name
+#     as the alternate. Build on Trixie against archive libjxl-dev.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -58,7 +60,7 @@ Version: ${VERSION}
 Section: science
 Priority: optional
 Architecture: ${ARCH}
-Depends: orthanc (>= 1.12.10), libjxl (>= 0.12)
+Depends: orthanc (>= 1.12.10), libjxl0.11 | libjxl (>= 0.11)
 Maintainer: Kaitake Radiology Systems <ryan@testtoast.com>
 Description: JPEG-XL transcoding plugin for Orthanc
  Registers the JPEG XL transfer syntax (1.2.840.10008.1.2.4.110) with
