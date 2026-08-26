@@ -19,3 +19,6 @@ third_party/
 # Compiled objects
 *.o
 *.so
+deploy/*.deb
+deploy/build-release/
+deploy/orthanc-jxl_*/
