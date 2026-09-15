@@ -331,12 +331,110 @@ void DicomHandler::SetEncapsulatedFrames(const std::vector<std::vector<uint8_t>>
     }
 }
 
-void DicomHandler::SetUint16(uint16_t group, uint16_t element, uint16_t value) {
+void DicomHandler::SetUint16(uint16_t group, uint16_t element, uint16_t value,
+                             bool forceUnsignedVR) {
     DcmDataset* dataset = fileFormat_->getDataset();
-    OFCondition status = dataset->putAndInsertUint16(DcmTagKey(group, element), value);
+    OFCondition status;
+    if (forceUnsignedVR) {
+        // Bypass dictionary-default ambiguous-VR ("xs" = US or SS) resolution
+        // and force VR US explicitly - used when re-typing a padding value
+        // after the signed offset rewrite has made it unsigned.
+        DcmTag tag(DcmTagKey(group, element), EVR_US);
+        status = dataset->putAndInsertUint16(tag, value);
+    } else {
+        status = dataset->putAndInsertUint16(DcmTagKey(group, element), value);
+    }
     if (status.bad()) {
         throw DicomHandlerError("Failed to set DICOM tag");
     }
+}
+
+void DicomHandler::SetSint16(uint16_t group, uint16_t element, int16_t value) {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    DcmTag tag(DcmTagKey(group, element), EVR_SS);
+    OFCondition status = dataset->putAndInsertSint16(tag, value);
+    if (status.bad()) {
+        throw DicomHandlerError("Failed to set DICOM tag");
+    }
+}
+
+bool DicomHandler::GetSint16(uint16_t group, uint16_t element, int16_t& value) const {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    Sint16 v = 0;
+    if (dataset->findAndGetSint16(DcmTagKey(group, element), v).bad()) {
+        return false;
+    }
+    value = v;
+    return true;
+}
+
+bool DicomHandler::GetUint16(uint16_t group, uint16_t element, uint16_t& value) const {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    Uint16 v = 0;
+    if (dataset->findAndGetUint16(DcmTagKey(group, element), v).bad()) {
+        return false;
+    }
+    value = v;
+    return true;
+}
+
+bool DicomHandler::GetString(uint16_t group, uint16_t element, std::string& value) const {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    OFString ofval;
+    if (dataset->findAndGetOFStringArray(DcmTagKey(group, element), ofval).bad()) {
+        return false;
+    }
+    value.assign(ofval.c_str(), ofval.length());
+    return true;
+}
+
+bool DicomHandler::GetMetaString(uint16_t group, uint16_t element, std::string& value) const {
+    DcmMetaInfo* metaInfo = fileFormat_->getMetaInfo();
+    if (!metaInfo) {
+        return false;
+    }
+    OFString ofval;
+    if (metaInfo->findAndGetOFStringArray(DcmTagKey(group, element), ofval).bad()) {
+        return false;
+    }
+    value.assign(ofval.c_str(), ofval.length());
+    return true;
+}
+
+void DicomHandler::SetString(uint16_t group, uint16_t element, const std::string& value) {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    OFCondition status = dataset->putAndInsertString(DcmTagKey(group, element), value.c_str());
+    if (status.bad()) {
+        throw DicomHandlerError("Failed to set DICOM string tag");
+    }
+}
+
+void DicomHandler::RemoveTag(uint16_t group, uint16_t element) {
+    DcmDataset* dataset = fileFormat_->getDataset();
+    delete dataset->remove(DcmTagKey(group, element));
+}
+
+std::string DicomHandler::GenerateNewSopInstanceUid() {
+    DcmDataset* dataset = fileFormat_->getDataset();
+
+    char newUid[65];  // dcmGenerateUniqueIdentifier requires >= 65 bytes
+    dcmGenerateUniqueIdentifier(newUid, SITE_INSTANCE_UID_ROOT);
+
+    if (dataset->putAndInsertString(DCM_SOPInstanceUID, newUid).bad()) {
+        throw DicomHandlerError("Failed to set new SOPInstanceUID");
+    }
+
+    // Keep the file-meta MediaStorageSOPInstanceUID in sync with the
+    // dataset's SOPInstanceUID - PS3.10 requires them to match, and
+    // Orthanc/other consumers read identity from the meta header.
+    DcmMetaInfo* metaInfo = fileFormat_->getMetaInfo();
+    if (metaInfo) {
+        if (metaInfo->putAndInsertString(DCM_MediaStorageSOPInstanceUID, newUid).bad()) {
+            throw DicomHandlerError("Failed to set MediaStorageSOPInstanceUID");
+        }
+    }
+
+    return std::string(newUid);
 }
 
 void DicomHandler::SetNativePixelData(const std::vector<uint8_t>& pixelData) {

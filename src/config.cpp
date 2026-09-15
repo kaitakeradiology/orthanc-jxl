@@ -117,6 +117,20 @@ PluginConfig PluginConfig::Parse(const char* jsonConfig) {
         return Default();
     }
 
+    // Diagnose (but do not alter) the libjxl 0.12 PROGRESSIVE_DC+AC defect
+    // combination - jxl_codec.cpp clamps PROGRESSIVE_AC off unconditionally
+    // at encode time regardless of this flag; it exists so plugin.cpp can log
+    // the situation once at startup rather than per image. CenterFirstOrdering
+    // is the only source of an explicit group-order centre this config
+    // exposes (there is no JSON key for a fixed centreX/Y), so it alone
+    // decides whether every future VarDCT encode will hit the defect.
+    if (config.encodeOptions.mode == EncodeMode::ProgressiveVarDCT &&
+        config.encodeOptions.progressiveAC &&
+        config.encodeOptions.progressiveDC >= 1 &&
+        config.centerFirstOrdering) {
+        config.progressiveAcDefectWillBeClamped = true;
+    }
+
     return config;
 }
 

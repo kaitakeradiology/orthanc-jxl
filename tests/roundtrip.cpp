@@ -20,7 +20,10 @@
 #include <dcmtk/dcmjpeg/djdecode.h>
 #include <dcmtk/dcmjpls/djdecode.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -62,9 +65,11 @@ static std::vector<uint8_t> ExpectedRecovered(const DicomImageInfo& info,
     return out;
 }
 
-static bool RunOne(const char* path, ThreadPool& pool) {
-    auto dicom = ReadFile(path);
-
+// Lossless roundtrip check (native -> JXL -> native), shared by the
+// file-based test and the lossless sanity check of the synthetic signed
+// fixture below. `label` is only used for the printed report line.
+static bool RunOneBytes(const char* label, const std::vector<uint8_t>& dicom,
+                        ThreadPool& pool) {
     DicomImageInfo info;
     std::vector<uint8_t> origPixels;
     {
@@ -99,7 +104,9 @@ static bool RunOne(const char* path, ThreadPool& pool) {
 
     std::vector<uint8_t> expected = ExpectedRecovered(info, origPixels);
 
-    bool tsOk = IsJxlTransferSyntax(jxlTs);
+    // A lossless config must produce .110, never the lossy .112 - this exact
+    // combination once mislabeled lossy bits, see VerifyLossyRewrite below.
+    bool tsOk = (jxlTs == TS_JPEG_XL_LOSSLESS);
     bool framesOk = (encFrames == info.numberOfFrames) &&
                     (fromJxl.frameCount == info.numberOfFrames);
     bool sizeOk = (rtPixels.size() == expected.size());
@@ -110,7 +117,7 @@ static bool RunOne(const char* path, ThreadPool& pool) {
         ? static_cast<double>(toJxl.nativeBytes) / toJxl.encodedBytes : 0.0;
 
     printf("%-40s %3ux%-3u f=%-3u spp=%u ba=%-2u %-14s planar=%u  %5.2fx  %s\n",
-           path, info.width, info.height, info.numberOfFrames,
+           label, info.width, info.height, info.numberOfFrames,
            info.samplesPerPixel, info.bitsAllocated,
            info.photometricInterpretation.c_str(), info.planarConfiguration,
            ratio, pass ? "PASS" : "FAIL");
@@ -126,21 +133,182 @@ static bool RunOne(const char* path, ThreadPool& pool) {
     return pass;
 }
 
-// Verify a lossy (distance > 0) configuration is labelled with the lossy JXL
-// transfer syntax (.112), not mathematically-lossless (.110).
-static bool VerifyLossyLabeling(const char* path, ThreadPool& pool) {
+static bool RunOne(const char* path, ThreadPool& pool) {
+    return RunOneBytes(path, ReadFile(path), pool);
+}
+
+// Build a signed 16-bit variant of an uncompressed source: shift every
+// sample down by kShift (so the encoded range spans both signs, exercising
+// the sign-offset rewrite meaningfully) and widen BitsStored/HighBit to the
+// full 16-bit word - real signed CT almost always does this too, precisely
+// to avoid the sub-word two's-complement packing DicomImageInfo::isSigned
+// callers otherwise have to reason about. RescaleIntercept is adjusted so
+// the recovered HU values are identical to the source's, and a synthetic
+// PixelPaddingValue is added (at the shifted range's low end) purely to
+// exercise that tag's rewrite path too.
+static std::vector<uint8_t> MakeSyntheticSigned(const std::vector<uint8_t>& srcDicom,
+                                                double existingIntercept) {
+    constexpr int32_t kShift = 2048;
+
+    DicomHandler handler(srcDicom.data(), srcDicom.size());
+    handler.EnsureUncompressed();
+    std::vector<uint8_t> pixels = handler.GetPixelData();
+
+    uint16_t* samples = reinterpret_cast<uint16_t*>(pixels.data());
+    const size_t count = pixels.size() / 2;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t v = static_cast<int32_t>(samples[i]) - kShift;
+        samples[i] = static_cast<uint16_t>(static_cast<int16_t>(v));
+    }
+    handler.SetNativePixelData(pixels);
+
+    handler.SetUint16(0x0028, 0x0103, 1);   // PixelRepresentation = signed
+    handler.SetUint16(0x0028, 0x0101, 16);  // BitsStored
+    handler.SetUint16(0x0028, 0x0102, 15);  // HighBit
+
+    char interceptBuf[32];
+    std::snprintf(interceptBuf, sizeof(interceptBuf), "%.0f", existingIntercept + kShift);
+    handler.SetString(0x0028, 0x1052, interceptBuf);  // RescaleIntercept
+
+    handler.SetSint16(0x0028, 0x0120, static_cast<int16_t>(-kShift));  // PixelPaddingValue
+
+    return handler.WriteToBuffer(TS_LITTLE_ENDIAN_EXPLICIT);
+}
+
+// Comprehensive check of the lossy TO-JXL rewrite (dicom_handler.cpp /
+// transcode.cpp ApplyLossyTags): transfer syntax, every PS3.3 C.7.6.1.1.5
+// lossy tag, the signed->unsigned pixel/tag rewrite, new SOPInstanceUID
+// bookkeeping, and that the HU values recovered from the lossy bits are
+// still close to the source's. Also re-checks the synthetic signed fixture
+// through the LOSSLESS path (RunOneBytes) to confirm the sign-offset rewrite
+// never engages there.
+static bool VerifyLossyRewrite(const char* path, ThreadPool& pool) {
+    bool allOk = true;
     auto dicom = ReadFile(path);
+
+    double origIntercept = 0.0, origSlope = 1.0;
+    std::vector<uint8_t> origPixels;
+    {
+        DicomHandler h(dicom.data(), dicom.size());
+        h.EnsureUncompressed();
+        origPixels = h.GetPixelData();
+        std::string s;
+        if (h.GetString(0x0028, 0x1052, s)) origIntercept = std::atof(s.c_str());
+        if (h.GetString(0x0028, 0x1053, s)) origSlope = std::atof(s.c_str());
+    }
+
+    auto signedDicom = MakeSyntheticSigned(dicom, origIntercept);
+
+    std::string origSopUid;
+    {
+        DicomHandler h(signedDicom.data(), signedDicom.size());
+        h.GetString(0x0008, 0x0018, origSopUid);
+    }
+
+    // The lossless path must stay bit-exact for signed data too - the
+    // sign-offset rewrite is gated on `lossy` in transcode.cpp and must never
+    // engage here.
+    if (!RunOneBytes("synthetic-signed (lossless)", signedDicom, pool)) {
+        allOk = false;
+    }
+
+    const float kDistance = 0.5f;
     PluginConfig config = PluginConfig::Default();
     config.encodeOptions.mode = EncodeMode::ProgressiveVarDCT;
-    config.encodeOptions.distance = 1.0f;
+    config.encodeOptions.distance = kDistance;
 
-    TranscodeResult r = TranscodeToJxl(dicom.data(), dicom.size(), config, pool);
-    DicomHandler h(r.dicom.data(), r.dicom.size());
-    std::string ts = h.GetTransferSyntax();
-    bool ok = (ts == TS_JPEG_XL);
-    printf("%-40s lossy distance=1.0 -> %s  %s\n", path, ts.c_str(),
-           ok ? "PASS" : "FAIL (expected .112)");
-    return ok;
+    TranscodeResult lossy = TranscodeToJxl(signedDicom.data(), signedDicom.size(), config, pool);
+
+    DicomHandler out(lossy.dicom.data(), lossy.dicom.size());
+    const std::string ts = out.GetTransferSyntax();
+    const DicomImageInfo outInfo = out.GetImageInfo();
+
+    std::string lossyFlag, method, ratioStr, imageType, sopUid, mediaSopUid, interceptStr;
+    out.GetString(0x0028, 0x2110, lossyFlag);
+    out.GetString(0x0028, 0x2114, method);
+    out.GetString(0x0028, 0x2112, ratioStr);
+    out.GetString(0x0008, 0x0008, imageType);
+    out.GetString(0x0008, 0x0018, sopUid);
+    out.GetMetaString(0x0002, 0x0003, mediaSopUid);
+    out.GetString(0x0028, 0x1052, interceptStr);
+
+    uint16_t paddingOut = 0;
+    const bool paddingReadable = out.GetUint16(0x0028, 0x0120, paddingOut);
+
+    const uint32_t offset = 1u << 15;  // BitsStored=16 in the synthetic fixture
+    const double expectedIntercept = (origIntercept + 2048.0) - static_cast<double>(offset);
+    const double gotIntercept = std::atof(interceptStr.c_str());
+    const uint16_t expectedPadding = static_cast<uint16_t>(-2048 + static_cast<int32_t>(offset));
+
+    struct Check { const char* name; bool ok; std::string detail; };
+    std::vector<Check> checks;
+    checks.push_back({"transfer syntax .112", ts == TS_JPEG_XL, ts});
+    checks.push_back({"PixelRepresentation unsigned", !outInfo.isSigned, ""});
+    checks.push_back({"LossyImageCompression=01", lossyFlag == "01", lossyFlag});
+    checks.push_back({"LossyImageCompressionMethod", method == "ISO_18181_1", method});
+    checks.push_back({"LossyImageCompressionRatio present", !ratioStr.empty() && std::atof(ratioStr.c_str()) > 1.0, ratioStr});
+    checks.push_back({"ImageType[0]=DERIVED",
+        imageType.rfind("DERIVED", 0) == 0 &&
+        (imageType.size() == 7 || imageType[7] == '\\'), imageType});
+    checks.push_back({"SOPInstanceUID changed", !sopUid.empty() && sopUid != origSopUid, sopUid});
+    checks.push_back({"MediaStorageSOPInstanceUID in sync", sopUid == mediaSopUid, mediaSopUid});
+    checks.push_back({"RescaleIntercept shifted by -offset",
+        std::fabs(gotIntercept - expectedIntercept) < 0.5, interceptStr});
+    checks.push_back({"PixelPaddingValue re-typed US + offset",
+        paddingReadable && paddingOut == expectedPadding, std::to_string(paddingOut)});
+
+    for (const auto& c : checks) {
+        if (!c.ok) allOk = false;
+        printf("    %-38s %-20s %s\n", c.name, c.detail.c_str(), c.ok ? "PASS" : "FAIL");
+    }
+
+    // Smallest/LargestImagePixelValue must be gone (they described the old
+    // signed range and were never recomputed).
+    uint16_t discard = 0;
+    bool smallestGone = !out.GetUint16(0x0028, 0x0106, discard);
+    bool largestGone = !out.GetUint16(0x0028, 0x0107, discard);
+    printf("    %-38s %-20s %s\n", "Smallest/LargestImagePixelValue removed", "",
+           (smallestGone && largestGone) ? "PASS" : "FAIL");
+    if (!smallestGone || !largestGone) allOk = false;
+
+    // Decode the lossy bits back through the plugin's own FROM-JXL path and
+    // compare recovered HU values against the ORIGINAL (pre-shift) source.
+    TranscodeResult fromLossy = TranscodeFromJxl(
+        lossy.dicom.data(), lossy.dicom.size(), TS_LITTLE_ENDIAN_EXPLICIT, pool);
+    DicomHandler decodedHandler(fromLossy.dicom.data(), fromLossy.dicom.size());
+    std::vector<uint8_t> decodedPixels = decodedHandler.GetPixelData();
+
+    std::string decSlopeStr = "1", decInterceptStr = "0";
+    decodedHandler.GetString(0x0028, 0x1053, decSlopeStr);
+    decodedHandler.GetString(0x0028, 0x1052, decInterceptStr);
+    const double decSlope = std::atof(decSlopeStr.c_str());
+    const double decIntercept = std::atof(decInterceptStr.c_str());
+
+    const uint16_t* decSamples = reinterpret_cast<const uint16_t*>(decodedPixels.data());
+    const uint16_t* origSamples = reinterpret_cast<const uint16_t*>(origPixels.data());
+    const size_t n = std::min(decodedPixels.size(), origPixels.size()) / 2;
+
+    double sumSq = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double huDecoded = static_cast<double>(decSamples[i]) * decSlope + decIntercept;
+        const double huOrig = static_cast<double>(origSamples[i]) * origSlope + origIntercept;
+        const double diff = huDecoded - huOrig;
+        sumSq += diff * diff;
+    }
+    const double rmse = (n > 0) ? std::sqrt(sumSq / static_cast<double>(n)) : 0.0;
+
+    // Threshold derived from the gateway's own measurement at the same
+    // distance (d=0.5 -> RMSE~41 for the offset/sRGB-TF encoding on the
+    // reference 512x512 CT); 60 leaves headroom for a different image.
+    const double kRmseThreshold = 60.0;
+    const bool rmseOk = rmse < kRmseThreshold;
+    printf("    %-38s RMSE=%-14.2f %s\n", "recovered HU vs. original", rmse,
+           rmseOk ? "PASS" : "FAIL");
+    if (!rmseOk) allOk = false;
+
+    printf("%-40s d=%.1f -> %s  %s\n\n", path, kDistance, ts.c_str(),
+           allOk ? "PASS" : "FAIL");
+    return allOk;
 }
 
 int main(int argc, char* argv[]) {
@@ -169,14 +337,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Lossy transfer-syntax labelling check (uses the first input file).
+    // Lossy TO-JXL rewrite check (uses the first input file).
     printf("\n");
     try {
-        if (!VerifyLossyLabeling(argv[1], pool)) {
+        if (!VerifyLossyRewrite(argv[1], pool)) {
             ++failures;
         }
     } catch (const std::exception& e) {
-        printf("lossy-labeling  ERROR: %s\n", e.what());
+        printf("lossy-rewrite  ERROR: %s\n", e.what());
         ++failures;
     }
 

@@ -143,6 +143,13 @@ std::vector<uint8_t> JxlCodec::Encode(
         }
     }
 
+    // True only for an actual lossy encode (VarDCT with a non-zero distance).
+    // A VarDCT config with distance == 0 is a lossless config (just a
+    // different, faster-decoding lossless encoding than modular) and keeps
+    // the settings below unchanged.
+    const bool lossyVarDCT =
+        (options.mode == EncodeMode::ProgressiveVarDCT && options.distance > 0.0f);
+
     // Set up basic info
     JxlBasicInfo basicInfo;
     JxlEncoderInitBasicInfo(&basicInfo);
@@ -151,7 +158,18 @@ std::vector<uint8_t> JxlCodec::Encode(
     basicInfo.ysize = height;
     basicInfo.bits_per_sample = BitsPerSample(format);
     basicInfo.exponent_bits_per_sample = 0;  // Integer samples
-    basicInfo.uses_original_profile = JXL_TRUE;  // Preserve values for medical imaging
+    // uses_original_profile=TRUE tells libjxl to quantise in the ORIGINAL
+    // (stored-unit) colour space - correct for every lossless mode, but for
+    // lossy VarDCT it disables the perceptually-uniform XYB transform
+    // entirely, so the transfer function below becomes irrelevant and the
+    // encoder spends its distance budget in stored-unit space instead of a
+    // perceptual one. Measured on one 512x512 signed CT: TRUE (the old
+    // behaviour) gave d=1.0 -> 19.9KB at RMSE~147 (about a third of a
+    // soft-tissue window); FALSE (XYB enabled) gave d=1.0 -> 10.2KB at
+    // RMSE~34 for the offset data (RMSE~84 on the raw signed bits, before
+    // the sign-offset fix below). Only flip this for an actual lossy encode -
+    // lossless paths must stay bit-exact.
+    basicInfo.uses_original_profile = lossyVarDCT ? JXL_FALSE : JXL_TRUE;
     basicInfo.num_color_channels = IsGrayscale(format) ? 1 : 3;
     basicInfo.num_extra_channels = 0;
     basicInfo.alpha_bits = 0;
@@ -167,8 +185,15 @@ std::vector<uint8_t> JxlCodec::Encode(
     // for everything:
     //   - grayscale medical data holds raw, linear-in-stored-units intensities
     //     (display is driven by the DICOM modality LUT / Rescale / Window, not
-    //     an embedded profile), so signal LINEAR;
-    //   - DICOM RGB without an ICC profile is assumed sRGB display data.
+    //     an embedded profile), so signal LINEAR when uses_original_profile is
+    //     TRUE (lossless / lossless-VarDCT);
+    //   - for a lossy VarDCT encode uses_original_profile is FALSE (XYB is
+    //     enabled, see above), which requires a real perceptual transfer
+    //     function to be meaningful - use sRGB, matching the RGB case, per
+    //     the measured numbers in the basicInfo comment above;
+    //   - DICOM RGB without an ICC profile is assumed sRGB display data,
+    //     regardless of mode (uses_original_profile is unaffected by
+    //     RGB vs grayscale).
     // libjxl requires a known transfer function here (UNKNOWN is rejected when
     // uses_original_profile is set). Use RELATIVE (colorimetric) intent, which
     // suits measured data better than PERCEPTUAL.
@@ -178,7 +203,7 @@ std::vector<uint8_t> JxlCodec::Encode(
     colorEncoding.white_point = JXL_WHITE_POINT_D65;
     colorEncoding.primaries = JXL_PRIMARIES_SRGB;  // ignored for grayscale
     colorEncoding.transfer_function =
-        gray ? JXL_TRANSFER_FUNCTION_LINEAR : JXL_TRANSFER_FUNCTION_SRGB;
+        (gray && !lossyVarDCT) ? JXL_TRANSFER_FUNCTION_LINEAR : JXL_TRANSFER_FUNCTION_SRGB;
     colorEncoding.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
 
     if (JxlEncoderSetColorEncoding(encoder.get(), &colorEncoding) != JXL_ENC_SUCCESS) {
@@ -223,7 +248,22 @@ std::vector<uint8_t> JxlCodec::Encode(
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_MODULAR, 0);
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC,
                                              options.progressiveDC);
-            if (options.progressiveAC) {
+            // libjxl 0.12 (build 7a208214) defect, reproduced directly with
+            // cjxl: PROGRESSIVE_DC >= 1 combined with PROGRESSIVE_AC fails the
+            // encode outright whenever an explicit (non-auto, i.e. >= 0)
+            // group-order centre is also set. This plugin's default
+            // CenterFirstOrdering=true means a centre is set for essentially
+            // every real image, so the combination is a config-time choice,
+            // not a per-image one - clamp it here unconditionally rather than
+            // let an encode fail, and warn once at plugin startup from the
+            // parsed config (see PluginConfig::Parse in config.cpp), since
+            // that's the only place that knows this is happening without
+            // spamming a warning per image.
+            if (options.progressiveAC && options.progressiveDC >= 1 &&
+                (options.centerX >= 0 || options.centerY >= 0)) {
+                // Defect combination: leave PROGRESSIVE_AC at the encoder's
+                // own default (off) instead of propagating a hard failure.
+            } else if (options.progressiveAC) {
                 JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, 1);
             }
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER, 1);

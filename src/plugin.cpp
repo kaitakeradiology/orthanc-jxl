@@ -148,21 +148,30 @@ static OrthancPluginErrorCode TranscoderCallback(
     uint32_t countSyntaxes,
     uint8_t allowNewSopInstanceUid)
 {
-    (void)allowNewSopInstanceUid;  // Not used for JXL transcoding
-
-    // Check what transfer syntaxes are requested
-    bool jxlRequested = false;
+    // Check what transfer syntaxes are requested. wants110/wants112 are kept
+    // separate (rather than a single jxlRequested flag) because which one is
+    // offered decides whether we may produce genuinely lossy bits at all -
+    // see the request->encode decision below.
+    bool wants110 = false;  // JPEG XL Lossless
+    bool wants112 = false;  // JPEG XL (this plugin's convention: lossy output)
     const char* uncompressedSyntax = nullptr;
 
     for (uint32_t i = 0; i < countSyntaxes; ++i) {
         if (strcmp(allowedSyntaxes[i], TS_JPEG_XL_LOSSLESS) == 0) {
-            jxlRequested = true;
+            wants110 = true;
+        }
+        if (strcmp(allowedSyntaxes[i], TS_JPEG_XL) == 0) {
+            wants112 = true;
         }
         // Track first uncompressed syntax for FROM-JXL transcoding
         if (!uncompressedSyntax && IsUncompressedTransferSyntax(allowedSyntaxes[i])) {
             uncompressedSyntax = allowedSyntaxes[i];
         }
     }
+
+    const bool configLossy =
+        (pluginConfig_.encodeOptions.mode == EncodeMode::ProgressiveVarDCT &&
+         pluginConfig_.encodeOptions.distance > 0.0f);
 
     try {
         DicomHandler handler(buffer, static_cast<size_t>(size));
@@ -191,11 +200,58 @@ static OrthancPluginErrorCode TranscoderCallback(
         }
 
         // Case 2: JXL is requested and source is not JXL (TO-JXL)
-        if (jxlRequested && !IsJxlTransferSyntax(currentTs)) {
+        if ((wants110 || wants112) && !IsJxlTransferSyntax(currentTs)) {
+            // Decide what to actually produce. A request naming .112 while
+            // configured for lossy VarDCT produces genuinely lossy bits under
+            // .112. A request only naming .110 must never receive lossy bits
+            // under the Lossless UID, so force a lossless encode even when
+            // the plugin is configured for lossy output. A request only
+            // naming .112 while NOT configured for lossy output is declined:
+            // this plugin's convention is .110=lossless, .112=lossy, and
+            // labelling lossless bits as .112 would be the same mislabel in
+            // the other direction.
+            PluginConfig effectiveConfig = pluginConfig_;
+            bool willEncodeLossy = false;
+
+            if (wants112 && configLossy) {
+                willEncodeLossy = true;
+            } else if (wants110) {
+                if (configLossy) {
+                    effectiveConfig.encodeOptions.mode = EncodeMode::ProgressiveLossless;
+                    effectiveConfig.encodeOptions.distance = 0.0f;
+                    // The SDK exposes only Error/Warning/Info levels; Info is
+                    // the closest available to "debug" for a routine,
+                    // expected fallback (a requester offering only the
+                    // Lossless UID is normal, not misconfiguration).
+                    OrthancPluginLogInfo(context_,
+                        "orthanc-jxl: configured for lossy VarDCT but only "
+                        "1.2.840.10008.1.2.4.110 (Lossless) was requested - "
+                        "encoding ProgressiveLossless instead of mislabeling "
+                        "lossy bits as Lossless");
+                }
+                willEncodeLossy = false;
+            } else {
+                // Only .112 offered, config is not lossy: decline rather than
+                // mislabel lossless bits as .112.
+                return OrthancPluginErrorCode_NotImplemented;
+            }
+
+            if (willEncodeLossy && !allowNewSopInstanceUid) {
+                // A lossy encode always assigns a new SOPInstanceUID (PS3.3
+                // C.7.6.1.1.5-adjacent identity change - see
+                // ApplyLossyTags/GenerateNewSopInstanceUid). Orthanc's
+                // contract does not allow that when allowNewSopInstanceUid is
+                // false, so decline rather than silently break identity.
+                OrthancPluginLogWarning(context_,
+                    "orthanc-jxl: declining lossy TO-JXL - Orthanc did not "
+                    "allow a new SOPInstanceUID for this transcode");
+                return OrthancPluginErrorCode_NotImplemented;
+            }
+
             TranscodeResult result;
             try {
                 result = TranscodeToJxl(
-                    buffer, static_cast<size_t>(size), pluginConfig_, *threadPool_,
+                    buffer, static_cast<size_t>(size), effectiveConfig, *threadPool_,
                     pluginConfig_.SingleFrameThreads());
             } catch (const std::exception& e) {
                 // Can't decode/encode this source (e.g. a compressed syntax with
@@ -298,12 +354,35 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
         case EncodeMode::ProgressiveLossless: modeName = "ProgressiveLossless"; break;
         case EncodeMode::ProgressiveVarDCT: modeName = "ProgressiveVarDCT"; break;
     }
-    char configMsg[256];
+    // The TS a TO-JXL encode actually lands on for THIS config (matches the
+    // `lossy` decision in transcode.cpp): only a VarDCT config with a
+    // non-zero distance ever produces .112, everything else is .110.
+    const bool startupLossy =
+        (pluginConfig_.encodeOptions.mode == EncodeMode::ProgressiveVarDCT &&
+         pluginConfig_.encodeOptions.distance > 0.0f);
+    const char* targetTs = startupLossy ? TS_JPEG_XL : TS_JPEG_XL_LOSSLESS;
+    char configMsg[320];
     snprintf(configMsg, sizeof(configMsg),
-        "orthanc-jxl: Config - Mode=%s, Effort=%d, Distance=%.2f, EncodeThreads=%d, Pool=%u",
+        "orthanc-jxl: Config - Mode=%s, Effort=%d, Distance=%.2f, EncodeThreads=%d, "
+        "Pool=%u, TargetTS=%s",
         modeName, pluginConfig_.encodeOptions.effort, pluginConfig_.encodeOptions.distance,
-        pluginConfig_.encodeThreads, threadPool_ ? (unsigned)threadPool_->Size() : 0u);
+        pluginConfig_.encodeThreads, threadPool_ ? (unsigned)threadPool_->Size() : 0u,
+        targetTs);
     OrthancPluginLogInfo(context, configMsg);
+
+    if (pluginConfig_.progressiveAcDefectWillBeClamped) {
+        // See jxl_codec.cpp (ProgressiveVarDCT case) and config.cpp
+        // (progressiveAcDefectWillBeClamped) for the full story: libjxl 0.12
+        // fails the encode outright for this combination, so the codec
+        // always clamps PROGRESSIVE_AC off regardless of this warning - it
+        // exists purely so an admin who set ProgressiveAC=true knows why it
+        // isn't taking effect.
+        OrthancPluginLogWarning(context,
+            "orthanc-jxl: ProgressiveAC=true with ProgressiveDC>=1 and "
+            "CenterFirstOrdering=true hits a libjxl 0.12 defect (the encode "
+            "fails outright) - PROGRESSIVE_AC will be silently disabled for "
+            "every VarDCT encode");
+    }
 
     // Register DCMTK decoders so the transcoder can decode compressed sources
     // (JPEG / JPEG-LS) to native before JXL-encoding. Idempotent.

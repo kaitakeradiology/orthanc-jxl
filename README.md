@@ -10,7 +10,7 @@ The plugin implements the official DICOM Transfer Syntax UIDs defined in PS3.5 2
 
 ## Features
 
-- **JPEG-XL Encoding**: Transcode DICOM images to JPEG-XL lossless format
+- **JPEG-XL Encoding**: Transcode DICOM images to JPEG-XL, lossless or lossy
 - **JPEG-XL Decoding**: View JPEG-XL encoded DICOM images in Orthanc Explorer
 
 - **Official DICOM Transfer Syntaxes**:
@@ -149,11 +149,56 @@ curl -X POST http://localhost:8042/studies/{id}/modify \
 |------|-------------|----------|----------|
 | Lossless | No | Yes | Archival storage |
 | ProgressiveLossless | Yes | Yes | Streaming + archival |
+| ProgressiveVarDCT (Distance=0) | Yes | Yes | Lossless, faster decode than modular |
+| ProgressiveVarDCT (Distance>0) | Yes | **No** | Lossy - smallest size, preview/streaming |
 
 The plugin defaults to **ProgressiveLossless** mode, matching `cjxl -d 0 -p -e 7 --group_order 1`:
 - Effort 7 (balances encode speed and compression)
 - Responsive mode with squeeze transform
 - Center-first group ordering for streaming decode
+
+### ProgressiveVarDCT + Distance > 0 (lossy)
+
+A lossy encode is always written under transfer syntax `1.2.840.10008.1.2.4.112`
+("JPEG XL"), never `.110` ("JPEG XL Lossless") - the plugin's transcoder
+callback forces a lossless `ProgressiveLossless` re-encode instead if a
+requester only accepts `.110` while the plugin is configured for lossy VarDCT,
+so a lossy stream is never mislabelled as lossless.
+
+To make the lossy distance budget count, the encoder enables libjxl's XYB
+colour transform (rather than quantising in the raw stored-unit space) and,
+for signed pixel data (`PixelRepresentation` 1), biases every sample by
+`2^(BitsStored-1)` into unsigned "offset binary" before encoding - two's
+complement puts the padding region immediately next to small positive values,
+a huge discontinuity a perceptual codec otherwise spends its whole budget
+smearing across real tissue values. The bias is undone on decode via an
+adjusted `RescaleIntercept`, and the lossy rewrite also sets the PS3.3
+C.7.6.1.1.5 tags (`LossyImageCompression`/`Ratio`/`Method`), marks `ImageType`
+`DERIVED`, and assigns a new `SOPInstanceUID` (declined via
+`NotImplemented` if Orthanc's `allowNewSopInstanceUid` forbids it for that
+transcode).
+
+Measured on one 512x512 signed CT (-2000..3622, BitsStored=16), sRGB transfer
+function + signed offset, RMSE in stored (HU) units:
+
+| Distance | Size  | RMSE |
+|----------|-------|------|
+| 0.25     | ~10KB | 31   |
+| 0.5      | ~7KB  | 41   |
+| 1.0      | ~5KB  | 76   |
+
+Without the offset/XYB fix, `d=1.0` was 19.9KB at RMSE~147 (about a third of a
+soft-tissue window) - `uses_original_profile=TRUE` disabled XYB entirely and
+the sign discontinuity ate the distance budget. These numbers are from one
+image; treat them as illustrative, not a guarantee for every dataset.
+
+libjxl 0.12 (build `7a208214`) also fails the encode outright when
+`ProgressiveDC >= 1` and `ProgressiveAC` are both set together with an
+explicit (non-auto) group-order centre - which `CenterFirstOrdering=true`
+(the default) sets for essentially every image. The plugin clamps
+`ProgressiveAC` off automatically in that combination rather than propagate
+the failure, and logs a warning once at startup if the configured options
+would have hit it.
 
 ### Benchmark (512x512 16-bit CT, libjxl 0.12)
 
@@ -168,6 +213,11 @@ Lossy (d=1.0)                 7       31.1        1.7       20.0   25.65x       
 Lossy (d=1.0)                 9       41.7        1.8       20.0   25.63x        N/A
 ```
 
+The Lossy rows above predate the XYB/signed-offset fix described in
+"ProgressiveVarDCT + Distance > 0" and no longer reflect what the plugin
+produces (see the RMSE table there instead) - `jxl-benchmark` does not compute
+RMSE, only size/timing, so it has not been re-run for this change.
+
 Build with `-Dtests=true` and run `build/tests/jxl-benchmark <dicom_file>`.
 
 ## Limitations
@@ -176,7 +226,9 @@ Build with `-Dtests=true` and run `build/tests/jxl-benchmark <dicom_file>`.
   registered DCMTK decoder (uncompressed, JPEG, JPEG-LS). JPEG2000 has no DCMTK
   decoder and is not yet supported (would need an OpenJPEG decode path); such
   sources are declined and left in their original transfer syntax.
-- Lossless encoding only (lossy VarDCT mode planned)
+- Lossy encoding always assigns a new `SOPInstanceUID`; Orthanc transcodes
+  that forbid a new identity (`allowNewSopInstanceUid=false`) are declined
+  rather than served lossy bits under the original identity.
 
 ## Contributing
 
