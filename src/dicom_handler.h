@@ -87,7 +87,37 @@ public:
     void SetNativePixelData(const std::vector<uint8_t>& pixelData);
     void SetNativePixelData(const uint8_t* data, size_t size);
     void SetTransferSyntax(const std::string& transferSyntaxUid);
-    void SetUint16(uint16_t group, uint16_t element, uint16_t value);  // e.g. PlanarConfiguration
+
+    // Generic tag accessors used by the lossy TO-JXL rewrite (PS3.3
+    // C.7.6.1.1.5 lossy tags, RescaleIntercept/Slope, pixel padding).
+    //
+    // forceUnsignedVR is needed for the ambiguous "US or SS" tags
+    // (PixelPaddingValue/RangeLimit): dictionary-default VR resolution for a
+    // freshly-created element does not know PixelRepresentation has just
+    // changed, so a caller that just converted a value from signed to
+    // unsigned must say so explicitly.
+    void SetUint16(uint16_t group, uint16_t element, uint16_t value,
+                  bool forceUnsignedVR = false);  // e.g. PlanarConfiguration
+    void SetSint16(uint16_t group, uint16_t element, int16_t value);  // explicit VR SS
+    bool GetSint16(uint16_t group, uint16_t element, int16_t& value) const;
+    bool GetUint16(uint16_t group, uint16_t element, uint16_t& value) const;
+
+    // String-valued tags (CS/DS/UI/...). GetString returns false (value left
+    // untouched) if the tag is absent - how callers tell "not present" from
+    // "present and empty".
+    bool GetString(uint16_t group, uint16_t element, std::string& value) const;
+    void SetString(uint16_t group, uint16_t element, const std::string& value);
+
+    // Same as GetString but reads the FILE META INFO header (group 0002)
+    // instead of the dataset - e.g. MediaStorageSOPInstanceUID.
+    bool GetMetaString(uint16_t group, uint16_t element, std::string& value) const;
+
+    void RemoveTag(uint16_t group, uint16_t element);
+
+    // Generate a fresh SOP Instance UID, set it on the dataset, and keep the
+    // file meta header's MediaStorageSOPInstanceUID in sync (PS3.10 requires
+    // the two to match). Returns the new UID.
+    std::string GenerateNewSopInstanceUid();
 
     // Serialization
     std::vector<uint8_t> WriteToBuffer(const std::string& transferSyntaxUid) const;
