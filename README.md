@@ -111,8 +111,8 @@ Add an `OrthancJxl` section to your Orthanc configuration file:
     "Effort": 7,
     "Distance": 0.0,
     "CenterFirstOrdering": true,
-    "ProgressiveDC": 0,
-    "ProgressiveAC": false
+    "ProgressiveDC": 1,
+    "ProgressiveAC": true
   }
 }
 ```
@@ -123,8 +123,8 @@ Add an `OrthancJxl` section to your Orthanc configuration file:
 | `Effort` | int | `7` | Encoder effort level (1-10). Higher = slower but better compression |
 | `Distance` | float | `0.0` | Quality distance. 0.0 = mathematically lossless |
 | `CenterFirstOrdering` | bool | `true` | Enable center-first group ordering for streaming |
-| `ProgressiveDC` | int | `0` | VarDCT progressive DC level (0-2) |
-| `ProgressiveAC` | bool | `false` | VarDCT progressive AC encoding |
+| `ProgressiveDC` | int | `1` | VarDCT progressive DC level (0-2). 1 emits a hidden 8×-downsampled DC frame ahead of the main frame: the streaming server's L0, ~3 KB for a 512² CT slice |
+| `ProgressiveAC` | bool | `true` | VarDCT coarse-to-fine AC passes after the DC frame, so a partially received codestream refines across the whole image instead of jumping from DC to complete |
 
 All options are optional. The plugin uses sensible defaults if no configuration is provided.
 
@@ -240,13 +240,19 @@ Either way, the lossy rewrite also sets the PS3.3 C.7.6.1.1.5 tags
 assigns a new `SOPInstanceUID` (declined via `NotImplemented` if Orthanc's
 `allowNewSopInstanceUid` forbids it for that transcode).
 
-libjxl 0.12 (build `7a208214`) also fails the encode outright when
-`ProgressiveDC >= 1` and `ProgressiveAC` are both set together with an
-explicit (non-auto) group-order centre - which `CenterFirstOrdering=true`
-(the default) sets for essentially every image. The plugin clamps
-`ProgressiveAC` off automatically in that combination rather than propagate
-the failure, and logs a warning once at startup if the configured options
-would have hit it.
+libjxl (0.12 `7a208214`, unchanged at main `3368fd00`, 2026-09-15) fails
+the encode outright when `ProgressiveDC >= 1` and `ProgressiveAC` are set
+together with an *explicit* group-order centre: `enc_frame.cc` validates
+`center_x < frame_dim.xsize` on every frame, including the hidden
+8×-downsampled DC frame, so a centre of 256 on a 512-wide image fails against
+the DC frame's 64. The encoder's own auto centre recomputes the middle per
+frame and passes. `CenterFirstOrdering=true` wants exactly that middle, so
+the plugin only passes a centre to libjxl when it differs from the image
+middle (never, through this config) and lets the auto default do the
+ordering. DC+AC progressive therefore works; measured on a 512² brain slice
+at d=0.5 the partially received stream refines 115→103→75→45→32→7 HU brain
+RMSE across 3.1→17.6 KB, where DC-only sat at 115 until the last chunk. The
+AC passes cost ~7% (18.0 vs 16.8 KB).
 
 ### Benchmark (512x512 16-bit CT, libjxl 0.12)
 

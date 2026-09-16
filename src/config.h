@@ -33,8 +33,8 @@ namespace orthanc_jxl {
  *     "Effort": 7,                     // 1-10
  *     "Distance": 0.0,                 // 0.0 = lossless, >0 for lossy
  *     "CenterFirstOrdering": true,     // Enable center-first group ordering
- *     "ProgressiveDC": 0,              // VarDCT only: 0-2
- *     "ProgressiveAC": false,          // VarDCT only
+ *     "ProgressiveDC": 1,              // VarDCT only: 0-2 (1 = DC frame first, the streaming L0)
+ *     "ProgressiveAC": true,           // VarDCT only: coarse-to-fine AC passes
  *     "EncodeThreads": 0               // Single-frame encode threads: 0=auto, 1=single
  *   }
  * }
@@ -92,14 +92,6 @@ struct PluginConfig {
     // Multi-frame instances are unaffected (always one single-threaded frame per
     // pool worker).
     int encodeThreads = 0;
-
-    // Set by Parse() when ProgressiveDC/ProgressiveAC/CenterFirstOrdering
-    // would hit the libjxl 0.12 PROGRESSIVE_DC+AC-with-explicit-centre defect
-    // (see jxl_codec.cpp, ProgressiveVarDCT case) on every VarDCT encode.
-    // jxl_codec.cpp clamps PROGRESSIVE_AC off unconditionally regardless of
-    // this flag - it exists purely so plugin.cpp can log the situation once
-    // at startup instead of the codec logging (or not logging) it per image.
-    bool progressiveAcDefectWillBeClamped = false;
 
     // Resolve encodeThreads into the codec's worker-thread convention
     // (0 -> -1 = libjxl default).
