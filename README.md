@@ -166,20 +166,63 @@ requester only accepts `.110` while the plugin is configured for lossy VarDCT,
 so a lossy stream is never mislabelled as lossless.
 
 To make the lossy distance budget count, the encoder enables libjxl's XYB
-colour transform (rather than quantising in the raw stored-unit space) and,
-for signed pixel data (`PixelRepresentation` 1), biases every sample by
-`2^(BitsStored-1)` into unsigned "offset binary" before encoding - two's
-complement puts the padding region immediately next to small positive values,
-a huge discontinuity a perceptual codec otherwise spends its whole budget
-smearing across real tissue values. The bias is undone on decode via an
-adjusted `RescaleIntercept`, and the lossy rewrite also sets the PS3.3
-C.7.6.1.1.5 tags (`LossyImageCompression`/`Ratio`/`Method`), marks `ImageType`
-`DERIVED`, and assigns a new `SOPInstanceUID` (declined via
-`NotImplemented` if Orthanc's `allowNewSopInstanceUid` forbids it for that
-transcode).
+colour transform (rather than quantising in the raw stored-unit space) and
+declares the source's real (nominal) bit depth to libjxl instead of the full
+16-bit container `Gray16`/`RGB48` implies (`EncodeOptions::nominalBits`,
+`JxlEncoderSetFrameBitDepth`) - without this, a typical CT window is only a
+small fraction of a declared-16-bit full scale, so libjxl's perceptual
+distance model spends its budget nowhere near where the eye looks and its
+distance floor caps achievable quality well above clinically tolerable error.
+
+**Rescaled data (RescaleIntercept present - almost always CT/PET/MR) gets a
+13-bit HU codeword** instead of quantising raw stored units:
+
+```
+code = round(HU) + 3136,  valid codes 1..8191  (HU -3135..5055)
+padding -> code 0
+```
+
+Real HU for CT spans roughly -1024 (air) to a few thousand (dense bone/metal);
+this range covers it with headroom, in 13 declared bits instead of 16 - a
+12-bit codeword would clip dense bone, and re-biasing raw stored HU by a
+power-of-two offset (see below) leaves the codeword mismatched to the actual
+distribution. Padding pixels (PS3.3 C.7.5.1.1.2: pixels equal to
+`PixelPaddingValue`, extended to the inclusive band given by
+`PixelPaddingRangeLimit` when present) map to a reserved low-code band
+instead of a real HU value, precisely because lossy requantisation cannot
+guarantee an exact code for them - PS3.3 gives lossy compression exactly this
+mechanism so a decoder can still identify padding afterwards. The lossy
+rewrite sets `BitsStored` 13, `HighBit` 12, `PixelRepresentation` 0,
+`RescaleIntercept` "-3136", `RescaleSlope` "1", and (when padding was
+declared) `PixelPaddingValue` 0 / `PixelPaddingRangeLimit` 63.
+
+Measured on a GE head CT slice at a brain window (jxl-rs decode), RMSE in HU
+over non-padding pixels:
+
+| Distance | Size   | RMSE | p99 |
+|----------|--------|------|-----|
+| 0.2      | 26 KB  | 4.0  | -   |
+| 0.5      | 16.7 KB| 5.9  | 16  |
+| 1.0      | 12.7 KB| 7.2  | -   |
+| lossless | 120 KB | 0    | -   |
+
+Without declaring the real depth, the same brain window was ~0.1% of full
+scale to the perceptual model: `d=0.1` -> 12.8 KB at brain-interior RMSE 9.2,
+with libjxl's distance floor capping achievable quality near 8 HU regardless
+of how far `d` dropped further.
+
+**Data without `RescaleIntercept`** (not rescaled - not typically CT/PET/MR)
+keeps the original scheme: for signed pixel data (`PixelRepresentation` 1),
+every sample is biased by `2^(BitsStored-1)` into unsigned "offset binary"
+before encoding - two's complement puts the padding region immediately next
+to small positive values, a huge discontinuity a perceptual codec otherwise
+spends its whole budget smearing across real tissue values. The bias is
+undone on decode via an adjusted `RescaleIntercept`. `nominalBits` is still
+declared as `BitsStored` when narrower than `BitsAllocated`, same as the
+HU13 case.
 
 Measured on one 512x512 signed CT (-2000..3622, BitsStored=16), sRGB transfer
-function + signed offset, RMSE in stored (HU) units:
+function + signed offset, RMSE in stored (non-rescaled) units:
 
 | Distance | Size  | RMSE |
 |----------|-------|------|
@@ -191,6 +234,11 @@ Without the offset/XYB fix, `d=1.0` was 19.9KB at RMSE~147 (about a third of a
 soft-tissue window) - `uses_original_profile=TRUE` disabled XYB entirely and
 the sign discontinuity ate the distance budget. These numbers are from one
 image; treat them as illustrative, not a guarantee for every dataset.
+
+Either way, the lossy rewrite also sets the PS3.3 C.7.6.1.1.5 tags
+(`LossyImageCompression`/`Ratio`/`Method`), marks `ImageType` `DERIVED`, and
+assigns a new `SOPInstanceUID` (declined via `NotImplemented` if Orthanc's
+`allowNewSopInstanceUid` forbids it for that transcode).
 
 libjxl 0.12 (build `7a208214`) also fails the encode outright when
 `ProgressiveDC >= 1` and `ProgressiveAC` are both set together with an

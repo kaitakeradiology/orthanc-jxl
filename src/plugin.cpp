@@ -239,7 +239,7 @@ static OrthancPluginErrorCode TranscoderCallback(
             if (willEncodeLossy && !allowNewSopInstanceUid) {
                 // A lossy encode always assigns a new SOPInstanceUID (PS3.3
                 // C.7.6.1.1.5-adjacent identity change - see
-                // ApplyLossyTags/GenerateNewSopInstanceUid). Orthanc's
+                // ApplyCommonLossyTags/GenerateNewSopInstanceUid). Orthanc's
                 // contract does not allow that when allowNewSopInstanceUid is
                 // false, so decline rather than silently break identity.
                 OrthancPluginLogWarning(context_,

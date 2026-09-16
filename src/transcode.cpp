@@ -23,6 +23,7 @@
 #include "pixel_layout.h"
 #include "transfer_syntax.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -60,18 +61,10 @@ std::string DerivedImageType(const std::string& existing) {
     return "DERIVED" + rest;
 }
 
-// Apply the PS3.3 C.7.6.1.1.5 lossy-compression tags plus, for signed input,
-// the tag-side half of the sign-offset rewrite whose pixel-side half already
-// ran (in TranscodeToJxl, before encoding) via ApplySignedOffset. Common to
-// every lossy TO-JXL encode; the signed-only steps are gated on
-// applySignedOffset.
-//
-// The offset is series-CONSTANT by construction: it depends only on
-// BitsStored, which does not vary between instances of one series, so a
-// consumer (hikaru-core) that reads the intercept from a series' first
-// instance and applies it to every instance in that series stays correct.
-void ApplyLossyTags(DicomHandler& handler, bool applySignedOffset,
-                    uint32_t signedOffset, size_t nativeBytes, size_t encodedBytes) {
+// Apply the PS3.3 C.7.6.1.1.5 lossy-compression tags common to every lossy
+// TO-JXL encode, regardless of which pixel rewrite (HU13 or the legacy
+// signed-offset scheme, or neither for unsigned non-rescaled data) ran.
+void ApplyCommonLossyTags(DicomHandler& handler, size_t nativeBytes, size_t encodedBytes) {
     handler.SetString(0x0028, 0x2110, "01");  // LossyImageCompression
 
     const double ratio = encodedBytes
@@ -94,11 +87,19 @@ void ApplyLossyTags(DicomHandler& handler, bool applySignedOffset,
     // declined this transcode if Orthanc's allowNewSopInstanceUid forbade a
     // new identity.)
     handler.GenerateNewSopInstanceUid();
+}
 
-    if (!applySignedOffset) {
-        return;  // Unsigned input: no offset was applied, no LUT rewrite needed.
-    }
-
+// Tag-side half of the legacy 2^(BitsStored-1) signed-offset rewrite (see
+// pixel_layout.h ApplySignedOffset for the pixel-side half, already applied
+// before encoding). Only used for datasets WITHOUT RescaleIntercept - see
+// ApplyHu13DicomTags below for the rewrite that replaces this when
+// RescaleIntercept is present.
+//
+// The offset is series-CONSTANT by construction: it depends only on
+// BitsStored, which does not vary between instances of one series, so a
+// consumer (hikaru-core) that reads the intercept from a series' first
+// instance and applies it to every instance in that series stays correct.
+void ApplyOffsetSchemeTags(DicomHandler& handler, uint32_t signedOffset) {
     // --- Undo the signed -> unsigned pixel bias via the Modality LUT -------
     handler.SetUint16(0x0028, 0x0103, 0);  // PixelRepresentation -> unsigned
 
@@ -135,6 +136,34 @@ void ApplyLossyTags(DicomHandler& handler, bool applySignedOffset,
     // Smallest/LargestImagePixelValue described the old signed range and are
     // not recomputed here - remove rather than mislead a reader that doesn't
     // apply RescaleIntercept before comparing against them.
+    handler.RemoveTag(0x0028, 0x0106);  // SmallestImagePixelValue
+    handler.RemoveTag(0x0028, 0x0107);  // LargestImagePixelValue
+}
+
+// Tag-side half of the HU13 rewrite (pixel-side half is ApplyHu13Rewrite in
+// pixel_layout.h, already applied before encoding). Used whenever the source
+// dataset carries RescaleIntercept - see the kHu13* constants/comment in
+// pixel_layout.h for the codeword layout this establishes.
+void ApplyHu13DicomTags(DicomHandler& handler, bool hasPaddingBand) {
+    handler.SetUint16(0x0028, 0x0103, 0);   // PixelRepresentation -> unsigned
+    handler.SetUint16(0x0028, 0x0101, static_cast<uint16_t>(kHu13NominalBits));  // BitsStored
+    handler.SetUint16(0x0028, 0x0102, static_cast<uint16_t>(kHu13NominalBits - 1));  // HighBit
+    handler.SetString(0x0028, 0x1052, FormatDS(-static_cast<double>(kHu13Offset)));  // RescaleIntercept
+    handler.SetString(0x0028, 0x1053, "1");  // RescaleSlope
+
+    if (hasPaddingBand) {
+        // The codeword layout reserves 0 for padding and gives it a small
+        // decode band (measured 0..38 at d=0.5) rather than the single exact
+        // value a lossless encode could guarantee - PixelPaddingRangeLimit is
+        // PS3.3's mechanism for exactly this (C.7.5.1.1.2). Re-typed to US
+        // since PixelRepresentation is now 0.
+        handler.SetUint16(0x0028, 0x0120, kHu13PaddingCode, /*forceUnsignedVR=*/true);       // PixelPaddingValue
+        handler.SetUint16(0x0028, 0x0121, 63, /*forceUnsignedVR=*/true);  // PixelPaddingRangeLimit
+    }
+
+    // Described the old (pre-rewrite) sample range and are not recomputed
+    // here - remove rather than mislead a reader that doesn't apply
+    // RescaleIntercept before comparing against them.
     handler.RemoveTag(0x0028, 0x0106);  // SmallestImagePixelValue
     handler.RemoveTag(0x0028, 0x0107);  // LargestImagePixelValue
 }
@@ -186,16 +215,78 @@ TranscodeResult TranscodeToJxl(const void* dicom, size_t size,
         (opts.mode == EncodeMode::ProgressiveVarDCT && opts.distance > 0.0f);
     const std::string outTs = lossy ? TS_JPEG_XL : TS_JPEG_XL_LOSSLESS;
 
-    // For a lossy encode of SIGNED pixel data, bias every sample into
-    // unsigned "offset binary" before it reaches libjxl - see
-    // SignedSampleToOffsetBinary in pixel_layout.h for why. Never touches a
-    // lossless path (bit-exact roundtrip is required there), and is
-    // independent of frame slicing since it's a per-sample transform applied
-    // to the whole (all-frames-concatenated) pixel buffer up front.
-    const bool applySignedOffset = lossy && info.isSigned;
+    // A rescaled dataset (RescaleIntercept present - almost always CT/PET/MR)
+    // gets the HU13 rewrite instead of the legacy signed-offset scheme: it
+    // re-quantises directly in HU units, which is what makes the lossy
+    // distance budget meaningful (see kHu13* in pixel_layout.h). Datasets
+    // without RescaleIntercept keep the legacy scheme, gated as before on
+    // signed input. Neither ever touches a lossless path (bit-exact
+    // roundtrip is required there).
+    std::string sourceInterceptStr;
+    const bool hasRescaleIntercept = handler.GetString(0x0028, 0x1052, sourceInterceptStr);
+    const double sourceIntercept = hasRescaleIntercept ? std::atof(sourceInterceptStr.c_str()) : 0.0;
+    std::string sourceSlopeStr;
+    const double sourceSlope =
+        handler.GetString(0x0028, 0x1053, sourceSlopeStr) ? std::atof(sourceSlopeStr.c_str()) : 1.0;
+
+    // Grayscale only - a per-sample HU reinterpretation of interleaved RGB
+    // channels would be meaningless, and RescaleIntercept practically never
+    // appears on colour images anyway, but guard against a stray tag.
+    const bool hu13 = lossy && hasRescaleIntercept && info.samplesPerPixel == 1;
+    const bool applySignedOffset = lossy && !hu13 && info.isSigned;
     const uint32_t signedOffset =
         applySignedOffset ? (1u << (info.bitsStored - 1)) : 0u;
-    if (applySignedOffset) {
+
+    // Declaring the true bit depth to the encoder (rather than the full
+    // 16-bit container Gray16/RGB48 implies) is what makes the perceptual
+    // distance budget land on the real signal instead of treating it as a
+    // tiny fraction of full scale - see EncodeOptions::nominalBits. HU13
+    // codes are always 13 bits by construction; otherwise pass the source's
+    // own BitsStored through whenever it is narrower than BitsAllocated
+    // (true of most CT/MR regardless of sign or rescale).
+    if (hu13) {
+        opts.nominalBits = kHu13NominalBits;
+    } else if (lossy && info.bitsStored < info.bitsAllocated) {
+        opts.nominalBits = info.bitsStored;
+    }
+
+    bool hasPaddingBand = false;
+    if (hu13) {
+        Hu13Params hp;
+        hp.slope = sourceSlope;
+        hp.intercept = sourceIntercept;
+        hp.bitsStored = info.bitsStored;
+        hp.isSigned = info.isSigned;
+
+        // Padding band per PS3.3 C.7.5.1.1.2: pixels equal to
+        // PixelPaddingValue, extended to the inclusive band with
+        // PixelPaddingRangeLimit when present (order between the two is not
+        // guaranteed by the standard, so take min/max rather than assume).
+        // Both tags are read as signed since they must be interpreted as
+        // two's complement within BitsStored for signed source data, same as
+        // the pixel values themselves.
+        int16_t paddingValue = 0;
+        if (handler.GetSint16(0x0028, 0x0120, paddingValue)) {
+            int32_t lo = paddingValue;
+            int32_t hi = paddingValue;
+            int16_t paddingLimit = 0;
+            if (handler.GetSint16(0x0028, 0x0121, paddingLimit)) {
+                lo = std::min<int32_t>(paddingValue, paddingLimit);
+                hi = std::max<int32_t>(paddingValue, paddingLimit);
+            }
+            hp.hasPadding = true;
+            hp.paddingLo = lo;
+            hp.paddingHi = hi;
+            hasPaddingBand = true;
+        }
+
+        if (bytesPerSample == 2) {
+            ApplyHu13Rewrite<uint16_t>(
+                reinterpret_cast<uint16_t*>(pixels.data()), pixels.size() / 2, hp);
+        } else if (bytesPerSample == 1) {
+            ApplyHu13Rewrite<uint8_t>(pixels.data(), pixels.size(), hp);
+        }
+    } else if (applySignedOffset) {
         if (bytesPerSample == 2) {
             ApplySignedOffset<uint16_t>(
                 reinterpret_cast<uint16_t*>(pixels.data()),
@@ -239,7 +330,12 @@ TranscodeResult TranscodeToJxl(const void* dicom, size_t size,
     handler.SetTransferSyntax(outTs);
 
     if (lossy) {
-        ApplyLossyTags(handler, applySignedOffset, signedOffset, expected, encodedBytesTotal);
+        ApplyCommonLossyTags(handler, expected, encodedBytesTotal);
+        if (hu13) {
+            ApplyHu13DicomTags(handler, hasPaddingBand);
+        } else if (applySignedOffset) {
+            ApplyOffsetSchemeTags(handler, signedOffset);
+        }
     }
 
     TranscodeResult result;

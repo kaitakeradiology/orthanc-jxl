@@ -53,6 +53,20 @@ struct EncodeOptions {
     bool progressiveAC = false;
     float distance = 0.0f;   // 0.0 = mathematically lossless
 
+    // Nominal bit depth of the SOURCE samples, as opposed to the container
+    // width implied by PixelFormat (e.g. Gray16/RGB48 always use a 16-bit
+    // UINT16 container, but the real data may be 12 or 13 bits wide - CT
+    // BitsStored is almost never 16). 0 = same as the container width (the
+    // historical behaviour every existing caller gets by default). Declaring
+    // the true depth matters for a lossy VarDCT encode: libjxl's perceptual
+    // distance model normalises against the full container range, so an
+    // undeclared 16-bit width for genuinely 12/13-bit data makes the visible
+    // signal look like a tiny fraction of full scale to the quality model.
+    // Ignored for lossless modes in spirit (callers should simply leave it
+    // at 0 there - see jxl_codec.cpp Encode's JxlEncoderSetFrameBitDepth
+    // call for how a narrower depth is communicated to libjxl).
+    uint32_t nominalBits = 0;
+
     static EncodeOptions Lossless(int effort = 7);
     static EncodeOptions ProgressiveLossless(int effort = 7, int centerX = -1, int centerY = -1);
     static EncodeOptions ProgressiveVarDCT(int effort = 7, float distance = 0.0f,
