@@ -119,6 +119,32 @@ static JxlDataType ToJxlDataType(PixelFormat format) {
 // Encoding
 // ============================================================================
 
+
+namespace {
+
+// True when the caller asked for a centre that is NOT the image middle. The
+// middle is libjxl's own default for centre-first ordering, and letting the
+// encoder derive it keeps every frame (including a progressive-DC stream's
+// hidden downsampled DC frame) in range - see the PROGRESSIVE_AC note below.
+bool ExplicitCentre(const EncodeOptions& options, uint32_t width, uint32_t height) {
+    if (options.centerX < 0 && options.centerY < 0) return false;
+    return options.centerX != static_cast<int>(width / 2) ||
+           options.centerY != static_cast<int>(height / 2);
+}
+
+void SetGroupOrder(JxlEncoderFrameSettings* frameSettings, const EncodeOptions& options,
+                   uint32_t width, uint32_t height) {
+    JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER, 1);
+    if (ExplicitCentre(options, width, height)) {
+        JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_X,
+                                         options.centerX);
+        JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_Y,
+                                         options.centerY);
+    }
+}
+
+} // namespace
+
 std::vector<uint8_t> JxlCodec::Encode(
     const void* pixelData,
     uint32_t width,
@@ -242,11 +268,7 @@ std::vector<uint8_t> JxlCodec::Encode(
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_MODULAR, 1);
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_RESPONSIVE, 1);
             // Center-first group ordering for streaming
-            JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER, 1);
-            JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_X,
-                                             options.centerX);
-            JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_Y,
-                                             options.centerY);
+            SetGroupOrder(frameSettings, options, width, height);
             break;
 
         case EncodeMode::ProgressiveVarDCT:
@@ -259,29 +281,22 @@ std::vector<uint8_t> JxlCodec::Encode(
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_MODULAR, 0);
             JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC,
                                              options.progressiveDC);
-            // libjxl 0.12 (build 7a208214) defect, reproduced directly with
-            // cjxl: PROGRESSIVE_DC >= 1 combined with PROGRESSIVE_AC fails the
-            // encode outright whenever an explicit (non-auto, i.e. >= 0)
-            // group-order centre is also set. This plugin's default
-            // CenterFirstOrdering=true means a centre is set for essentially
-            // every real image, so the combination is a config-time choice,
-            // not a per-image one - clamp it here unconditionally rather than
-            // let an encode fail, and warn once at plugin startup from the
-            // parsed config (see PluginConfig::Parse in config.cpp), since
-            // that's the only place that knows this is happening without
-            // spamming a warning per image.
-            if (options.progressiveAC && options.progressiveDC >= 1 &&
-                (options.centerX >= 0 || options.centerY >= 0)) {
-                // Defect combination: leave PROGRESSIVE_AC at the encoder's
-                // own default (off) instead of propagating a hard failure.
-            } else if (options.progressiveAC) {
+            // libjxl defect (0.12 7a208214, still at main 3368fd00 2026-09-15):
+            // PROGRESSIVE_DC >= 1 + PROGRESSIVE_AC fails the encode whenever an
+            // EXPLICIT group-order centre is set, because enc_frame.cc checks
+            // `center_x < frame_dim.xsize` on every frame including the hidden
+            // 8x-downsampled DC frame (256 fails against 64). The auto centre
+            // recomputes xsize/2 per frame and passes. SetGroupOrder therefore
+            // only passes a centre that differs from the image middle - which
+            // this plugin never produces - so DC+AC is safe here, and with it
+            // the codestream refines coarse-to-fine across the whole image
+            // instead of jumping from DC straight to complete
+            // (measured 2026-09-16: brain RMSE 115->103->75->45->32->7 HU across
+            // 3.1->17.6 KB at d=0.5, vs. flat 115 until the last chunk).
+            if (options.progressiveAC && !ExplicitCentre(options, width, height)) {
                 JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, 1);
             }
-            JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER, 1);
-            JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_X,
-                                             options.centerX);
-            JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_Y,
-                                             options.centerY);
+            SetGroupOrder(frameSettings, options, width, height);
             break;
 
         default:

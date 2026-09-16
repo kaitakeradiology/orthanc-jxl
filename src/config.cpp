@@ -26,7 +26,11 @@ using json = nlohmann::json;
 EncodeOptions PluginConfig::GetEncodeOptions(uint32_t imageWidth, uint32_t imageHeight) const {
     EncodeOptions opts = encodeOptions;
 
-    // Apply center-first ordering if enabled
+    // Apply center-first ordering if enabled. The centre is the image middle,
+    // which is also libjxl's own default; jxl_codec.cpp's SetGroupOrder only
+    // hands an explicit centre to the encoder when it differs from that, so
+    // the progressive-DC hidden frame never sees an out-of-range centre (the
+    // libjxl DC+AC+explicit-centre defect, see the ProgressiveVarDCT case).
     if (centerFirstOrdering && opts.centerX < 0 && opts.centerY < 0) {
         opts.centerX = static_cast<int>(imageWidth / 2);
         opts.centerY = static_cast<int>(imageHeight / 2);
@@ -115,20 +119,6 @@ PluginConfig PluginConfig::Parse(const char* jsonConfig) {
     } catch (const json::exception&) {
         // Parse error - return default config
         return Default();
-    }
-
-    // Diagnose (but do not alter) the libjxl 0.12 PROGRESSIVE_DC+AC defect
-    // combination - jxl_codec.cpp clamps PROGRESSIVE_AC off unconditionally
-    // at encode time regardless of this flag; it exists so plugin.cpp can log
-    // the situation once at startup rather than per image. CenterFirstOrdering
-    // is the only source of an explicit group-order centre this config
-    // exposes (there is no JSON key for a fixed centreX/Y), so it alone
-    // decides whether every future VarDCT encode will hit the defect.
-    if (config.encodeOptions.mode == EncodeMode::ProgressiveVarDCT &&
-        config.encodeOptions.progressiveAC &&
-        config.encodeOptions.progressiveDC >= 1 &&
-        config.centerFirstOrdering) {
-        config.progressiveAcDefectWillBeClamped = true;
     }
 
     return config;

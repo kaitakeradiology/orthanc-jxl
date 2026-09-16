@@ -49,8 +49,9 @@ struct EncodeOptions {
     int effort = 7;          // 1-10, default 7 balances speed and compression
     int centerX = -1;        // Center for group ordering (-1 = auto)
     int centerY = -1;
-    int progressiveDC = 0;   // VarDCT only (0-2)
-    bool progressiveAC = false;
+    int progressiveDC = 1;   // VarDCT only (0-2): 1 = a hidden 8x-downsampled DC frame
+                             // ahead of the main frame, the streaming L0 (3 KB/slice)
+    bool progressiveAC = true; // VarDCT only: coarse-to-fine AC passes after the DC frame
     float distance = 0.0f;   // 0.0 = mathematically lossless
 
     // Nominal bit depth of the SOURCE samples, as opposed to the container

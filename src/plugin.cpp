@@ -370,20 +370,6 @@ ORTHANC_PLUGINS_API int32_t OrthancPluginInitialize(OrthancPluginContext* contex
         targetTs);
     OrthancPluginLogInfo(context, configMsg);
 
-    if (pluginConfig_.progressiveAcDefectWillBeClamped) {
-        // See jxl_codec.cpp (ProgressiveVarDCT case) and config.cpp
-        // (progressiveAcDefectWillBeClamped) for the full story: libjxl 0.12
-        // fails the encode outright for this combination, so the codec
-        // always clamps PROGRESSIVE_AC off regardless of this warning - it
-        // exists purely so an admin who set ProgressiveAC=true knows why it
-        // isn't taking effect.
-        OrthancPluginLogWarning(context,
-            "orthanc-jxl: ProgressiveAC=true with ProgressiveDC>=1 and "
-            "CenterFirstOrdering=true hits a libjxl 0.12 defect (the encode "
-            "fails outright) - PROGRESSIVE_AC will be silently disabled for "
-            "every VarDCT encode");
-    }
-
     // Register DCMTK decoders so the transcoder can decode compressed sources
     // (JPEG / JPEG-LS) to native before JXL-encoding. Idempotent.
     DJDecoderRegistration::registerCodecs();
