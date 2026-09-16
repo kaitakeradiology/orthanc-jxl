@@ -45,23 +45,39 @@ namespace orthanc_jxl {
  * requested syntax list interacts with this. To make the lossy distance
  * budget count, the encode enables libjxl's XYB colour transform
  * (uses_original_profile=FALSE, sRGB transfer function - see jxl_codec.cpp)
- * instead of quantising in the raw stored-unit space, and - for signed
- * pixel data (PixelRepresentation=1) - biases every sample by
- * 2^(BitsStored-1) into unsigned "offset binary" before encoding, undone on
- * decode via an adjusted RescaleIntercept (see dicom_handler.cpp/
- * transcode.cpp ApplyLossyTags). The lossy rewrite also sets the PS3.3
- * C.7.6.1.1.5 tags (LossyImageCompression/Ratio/Method), marks ImageType
- * DERIVED, and assigns a new SOPInstanceUID.
+ * instead of quantising in the raw stored-unit space, and declares the
+ * source's real (nominal) bit depth to the encoder instead of the full
+ * 16-bit container Gray16/RGB48 implies (EncodeOptions::nominalBits) - a
+ * full 16-bit declaration for e.g. 12-bit CT makes the encoder's perceptual
+ * distance model see the real signal as a tiny fraction of full scale.
  *
- * Measured on one 512x512 signed CT (-2000..3622, BitsStored=16), sRGB
- * transfer function + signed offset, RMSE in stored (HU) units:
- *   Distance  Size    RMSE
- *   0.25      ~10KB    31
- *   0.5        7KB     41
- *   1.0        5KB     76
- * (Without the offset/XYB fix, d=1.0 was 19.9KB at RMSE~147 - about a third
- * of a soft-tissue window - because uses_original_profile=TRUE disabled XYB
- * and the sign discontinuity ate the distance budget.)
+ * For a dataset with RescaleIntercept (almost always CT/PET/MR), the pixel
+ * data is additionally re-quantised directly into a 13-bit HU codeword
+ * (code = round(HU) + 3136, valid 1..8191; code 0 reserved for pixel
+ * padding) rather than encoding raw stored units - see the kHu13* constants
+ * in pixel_layout.h for the full rationale and transcode.cpp
+ * ApplyHu13DicomTags for the resulting tag rewrite (BitsStored 13,
+ * RescaleIntercept -3136, RescaleSlope 1, PixelPaddingValue/RangeLimit 0/63
+ * when padding was declared). A dataset WITHOUT RescaleIntercept instead
+ * keeps the older scheme: for signed pixel data (PixelRepresentation=1),
+ * biases every sample by 2^(BitsStored-1) into unsigned "offset binary"
+ * before encoding, undone on decode via an adjusted RescaleIntercept (see
+ * dicom_handler.cpp/transcode.cpp ApplyOffsetSchemeTags). Either way the
+ * lossy rewrite also sets the PS3.3 C.7.6.1.1.5 tags (LossyImageCompression/
+ * Ratio/Method), marks ImageType DERIVED, and assigns a new SOPInstanceUID
+ * (ApplyCommonLossyTags).
+ *
+ * Measured on one GE head CT slice at a brain window (jxl-rs decode), HU13
+ * codeword layout, XYB + sRGB transfer function:
+ *   Distance  Size    RMSE (brain interior, HU)
+ *   0.2       26KB     4.0
+ *   0.5       16.7KB   5.9  (p99 16)
+ *   1.0       12.7KB   7.2
+ *   lossless  120KB    0
+ * Without declaring the real depth, the same brain window was ~0.1% of full
+ * scale to the perceptual model: d=0.1 -> 12.8KB at RMSE 9.2, with libjxl's
+ * distance floor capping achievable quality near 8 HU regardless of how far
+ * d dropped further.
  */
 struct PluginConfig {
     EncodeOptions encodeOptions;

@@ -150,13 +150,24 @@ std::vector<uint8_t> JxlCodec::Encode(
     const bool lossyVarDCT =
         (options.mode == EncodeMode::ProgressiveVarDCT && options.distance > 0.0f);
 
+    // Nominal bit depth of the actual source data, vs. the UINT8/UINT16
+    // container width PixelFormat implies. 0 (the default for every existing
+    // lossless caller) means "same as the container" - no change from
+    // historical behaviour. See EncodeOptions::nominalBits and the
+    // JxlEncoderSetFrameBitDepth call below for why a narrower declared
+    // width needs help getting there.
+    const int containerBits = BitsPerSample(format);
+    const uint32_t nominalBits =
+        (options.nominalBits > 0 && options.nominalBits < static_cast<uint32_t>(containerBits))
+            ? options.nominalBits : static_cast<uint32_t>(containerBits);
+
     // Set up basic info
     JxlBasicInfo basicInfo;
     JxlEncoderInitBasicInfo(&basicInfo);
 
     basicInfo.xsize = width;
     basicInfo.ysize = height;
-    basicInfo.bits_per_sample = BitsPerSample(format);
+    basicInfo.bits_per_sample = nominalBits;
     basicInfo.exponent_bits_per_sample = 0;  // Integer samples
     // uses_original_profile=TRUE tells libjxl to quantise in the ORIGINAL
     // (stored-unit) colour space - correct for every lossless mode, but for
@@ -282,6 +293,28 @@ std::vector<uint8_t> JxlCodec::Encode(
 
     // Set effort level
     JxlEncoderFrameSettingsSetOption(frameSettings, JXL_ENC_FRAME_SETTING_EFFORT, options.effort);
+
+    // libjxl's default input interpretation (JXL_BIT_DEPTH_FROM_PIXEL_FORMAT)
+    // always rescales a UINT8/UINT16 buffer from the FULL container range
+    // (255 / 65535), regardless of the declared bits_per_sample above -
+    // measured: with that default, a 12-bit-nominal encode came back 16x too
+    // small (values sat in 0..4095 while the encoder divided by 65535, i.e.
+    // treated them as ~1/16 of full scale). JXL_BIT_DEPTH_FROM_CODESTREAM is
+    // the encoder-side counterpart of the JxlDecoderSetImageOutBitDepth fix
+    // in Decode() below: it tells the encoder the buffer already holds
+    // unscaled codestream-range values (e.g. 0..8191 for a 13-bit nominal
+    // depth), so no pixel-value rewriting is needed here at all - and,
+    // unlike a manual pre-shift-by-power-of-two, it round-trips exactly
+    // (a left-shift is not bit-identical to libjxl's own 65535/(2^n-1)
+    // rescale, which broke exact lossless roundtrips at nominal depths that
+    // aren't clean divisors of 16). A no-op (default kept) whenever
+    // nominalBits == containerBits, which is every lossless caller.
+    JxlBitDepth encodeBitDepth = {};
+    encodeBitDepth.type = (nominalBits < static_cast<uint32_t>(containerBits))
+        ? JXL_BIT_DEPTH_FROM_CODESTREAM : JXL_BIT_DEPTH_FROM_PIXEL_FORMAT;
+    if (JxlEncoderSetFrameBitDepth(frameSettings, &encodeBitDepth) != JXL_ENC_SUCCESS) {
+        throw JxlCodecError("Failed to set frame bit depth");
+    }
 
     // Set up pixel format
     JxlPixelFormat pixelFormat = {};
@@ -454,6 +487,20 @@ std::vector<uint8_t> JxlCodec::Decode(
                     if (JxlDecoderSetImageOutBuffer(decoder.get(), &pixelFormat,
                                                     result.data(), result.size()) != JXL_DEC_SUCCESS) {
                         throw JxlCodecError("Failed to set output buffer");
+                    }
+                    // Without this, libjxl's default (JXL_BIT_DEPTH_FROM_PIXEL_FORMAT)
+                    // scales output samples up to the full UINT8/UINT16 container
+                    // range - a 13-bit codestream (bits_per_sample=13, see the
+                    // encoder's nominalBits) would come back multiplied by
+                    // 65535/8191 (~8x) instead of as the original codes. Requesting
+                    // FROM_CODESTREAM here decodes into the codestream's native
+                    // range instead, so a UINT16 buffer holds e.g. 0..8191
+                    // unscaled. Must come after JxlDecoderSetImageOutBuffer - the
+                    // API rejects it otherwise ("No image out buffer was set").
+                    JxlBitDepth bitDepth = {};
+                    bitDepth.type = JXL_BIT_DEPTH_FROM_CODESTREAM;
+                    if (JxlDecoderSetImageOutBitDepth(decoder.get(), &bitDepth) != JXL_DEC_SUCCESS) {
+                        throw JxlCodecError("Failed to set image output bit depth");
                     }
                     outputBufferSet = true;
                 }
